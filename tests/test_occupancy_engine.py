@@ -1,0 +1,454 @@
+"""Scenario tests for the occupancy engine (docs/SPEC.md §6.2-§6.5).
+
+Pure Python, no Home Assistant dependency — per docs/TESTING.md layer 1,
+these should run in well under a second and don't need
+pytest-homeassistant-custom-component at all.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from custom_components.occupancy_tracker.occupancy_engine import (
+    OUTSIDE,
+    AreaActivitySignal,
+    ConnectorActivitySignal,
+    EngineConfig,
+    GraphConnector,
+    HouseGraph,
+    OccupancyEngine,
+    ProvenanceTier,
+    StateQuality,
+)
+
+T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _graph(area_ids: tuple[str, ...], connectors: tuple[GraphConnector, ...] = ()) -> HouseGraph:
+    return HouseGraph(area_ids=frozenset(area_ids), connectors=connectors)
+
+
+def test_new_engine_starts_empty_everywhere() -> None:
+    engine = OccupancyEngine(_graph(("kitchen", "hallway")))
+
+    kitchen = engine.area_state("kitchen", T0)
+
+    assert kitchen.occupant_count == 0
+    assert kitchen.last_confirmed is None
+    assert engine.total_occupant_count(T0) == 0
+
+
+def test_area_state_rejects_unknown_area() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    with pytest.raises(ValueError, match="Unknown area"):
+        engine.area_state("attic", T0)
+
+
+def test_area_activity_in_empty_area_seeds_one_occupant() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    state = engine.area_state("kitchen", T0)
+    assert state.occupant_count == 1
+    assert state.quality == StateQuality.CONFIRMED
+    assert state.last_confirmed == T0
+
+
+def test_further_activity_in_occupied_area_does_not_add_a_second_occupant() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    later = T0 + timedelta(seconds=30)
+    engine.process_signal(AreaActivitySignal("kitchen", later, source="binary_sensor.motion"))
+
+    state = engine.area_state("kitchen", later)
+    assert state.occupant_count == 1
+    assert state.last_confirmed == later  # evidence refreshed
+
+
+def test_latching_through_a_quiet_period_keeps_the_count() -> None:
+    """SPEC.md §6.2: absence of signal never decays the count."""
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    much_later = T0 + timedelta(minutes=60)
+    state = engine.area_state("kitchen", much_later)
+
+    assert state.occupant_count == 1  # never decayed
+    assert state.quality == StateQuality.LATCHED  # but freshness label degraded
+
+
+def test_quality_degrades_from_confirmed_to_latched_after_freshness_window() -> None:
+    config = EngineConfig(confirmed_freshness_window=timedelta(minutes=10))
+    engine = OccupancyEngine(_graph(("kitchen",)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    just_inside = T0 + timedelta(minutes=9, seconds=59)
+    just_outside = T0 + timedelta(minutes=10, seconds=1)
+
+    assert engine.area_state("kitchen", just_inside).quality == StateQuality.CONFIRMED
+    assert engine.area_state("kitchen", just_outside).quality == StateQuality.LATCHED
+
+
+def test_direct_transit_inferred_from_adjacency_with_no_connector_sensor() -> None:
+    """Most Connectors have no sensor of their own (SPEC.md §7.3 only lets users bind
+    entities to egress points, not ordinary Connector edges) — destination activity
+    plus topology adjacency alone must be enough to move an occupant token rather
+    than always reading as a brand-new occupant.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.kitchen_motion"))
+
+    moved = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        AreaActivitySignal("hallway", moved, source="binary_sensor.hallway_motion")
+    )
+
+    kitchen = engine.area_state("kitchen", moved)
+    hallway = engine.area_state("hallway", moved)
+    assert kitchen.occupant_count == 0
+    assert hallway.occupant_count == 1
+    assert hallway.quality == StateQuality.CONFIRMED  # no pending step -> confirmed immediately
+    assert engine.total_occupant_count(moved) == 1
+
+
+def test_direct_transit_not_inferred_with_multiple_occupied_neighbors() -> None:
+    """Ambiguous which neighbor the person came from -> treated as a new occupant,
+    not guessed.
+    """
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway))
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+
+    later = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", later, source="s3"))
+
+    assert engine.area_state("kitchen", later).occupant_count == 1
+    assert engine.area_state("study", later).occupant_count == 1
+    assert engine.area_state("hallway", later).occupant_count == 1
+    assert engine.total_occupant_count(later) == 3
+
+
+def test_direct_transit_not_inferred_with_no_occupied_neighbors() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))  # kitchen empty
+
+    engine.process_signal(AreaActivitySignal("hallway", T0, source="binary_sensor.hallway_motion"))
+
+    assert engine.area_state("kitchen", T0).occupant_count == 0
+    assert engine.area_state("hallway", T0).occupant_count == 1
+    assert engine.total_occupant_count(T0) == 1
+
+
+def test_direct_transit_not_inferred_when_gap_too_short_to_be_the_same_person() -> None:
+    """Two sensors firing near-simultaneously can't be one person walking between
+    rooms -- they can't teleport -- so this reads as a second, independent occupant.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(min_transit_time=timedelta(seconds=2))
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    almost_simultaneous = T0 + timedelta(milliseconds=500)
+    engine.process_signal(AreaActivitySignal("hallway", almost_simultaneous, source="s2"))
+
+    assert engine.area_state("kitchen", almost_simultaneous).occupant_count == 1
+    assert engine.area_state("hallway", almost_simultaneous).occupant_count == 1
+    assert engine.total_occupant_count(almost_simultaneous) == 2
+
+
+def test_direct_transit_inferred_at_exactly_the_minimum_plausible_gap() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(min_transit_time=timedelta(seconds=2))
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    exactly_min_gap = T0 + timedelta(seconds=2)
+    engine.process_signal(AreaActivitySignal("hallway", exactly_min_gap, source="s2"))
+
+    assert engine.area_state("kitchen", exactly_min_gap).occupant_count == 0
+    assert engine.area_state("hallway", exactly_min_gap).occupant_count == 1
+    assert engine.total_occupant_count(exactly_min_gap) == 1
+
+
+def test_direct_transit_not_inferred_when_source_evidence_is_stale() -> None:
+    """A gap longer than the transit window reads as unrelated, not a transfer."""
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=90))
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    long_after = T0 + timedelta(seconds=91)
+    engine.process_signal(AreaActivitySignal("hallway", long_after, source="s2"))
+
+    assert engine.area_state("kitchen", long_after).occupant_count == 1
+    assert engine.area_state("hallway", long_after).occupant_count == 1
+    assert engine.total_occupant_count(long_after) == 2
+
+
+def test_confirmed_multi_room_transit() -> None:
+    """A Connector that *does* have a sensor bound to it (SPEC.md §6.3) still goes
+    through the candidate-evidence -> pending -> corroboration cycle, distinct from
+    the sensor-less-Connector direct-adjacency path above.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.kitchen_motion"))
+
+    fired = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        ConnectorActivitySignal("c1", fired, source="binary_sensor.hallway_motion")
+    )
+    assert engine.area_state("kitchen", fired).quality == StateQuality.AMBIGUOUS
+    assert engine.area_state("hallway", fired).quality == StateQuality.AMBIGUOUS
+
+    corroborated = fired + timedelta(seconds=10)
+    engine.process_signal(
+        AreaActivitySignal("hallway", corroborated, source="binary_sensor.hallway_motion")
+    )
+
+    hallway = engine.area_state("hallway", corroborated)
+    assert engine.area_state("kitchen", corroborated).occupant_count == 0
+    assert hallway.occupant_count == 1
+    assert hallway.quality == StateQuality.CONFIRMED
+    assert engine.total_occupant_count(corroborated) == 1
+
+
+def test_unconfirmed_transit_leaves_occupant_in_source_area() -> None:
+    """SPEC.md §6.3: no corroborating Connector activity -> occupant assumed to stay put."""
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(
+        transit_confirmation_window=timedelta(seconds=30),
+        confirmed_freshness_window=timedelta(seconds=10),
+    )
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.kitchen_motion"))
+
+    fired = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        ConnectorActivitySignal("c1", fired, source="binary_sensor.hallway_motion")
+    )
+
+    after_timeout = fired + timedelta(seconds=31)
+    kitchen = engine.area_state("kitchen", after_timeout)
+    hallway = engine.area_state("hallway", after_timeout)
+
+    assert kitchen.occupant_count == 1
+    assert hallway.occupant_count == 0
+    assert kitchen.quality == StateQuality.LATCHED  # ambiguity resolved, back to latched
+    assert engine.pending_transit_connector_ids(after_timeout) == frozenset()
+
+
+def test_connector_activity_with_both_sides_occupied_is_inconclusive() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("hallway", T0, source="s2"))
+
+    fired = T0 + timedelta(seconds=5)
+    engine.process_signal(ConnectorActivitySignal("c1", fired, source="s3"))
+
+    assert engine.pending_transit_connector_ids(fired) == frozenset()
+    assert engine.area_state("kitchen", fired).occupant_count == 1
+    assert engine.area_state("hallway", fired).occupant_count == 1
+
+
+def test_connector_activity_with_both_sides_empty_is_inconclusive() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+
+    engine.process_signal(ConnectorActivitySignal("c1", T0, source="s1"))
+
+    assert engine.pending_transit_connector_ids(T0) == frozenset()
+    assert engine.total_occupant_count(T0) == 0
+
+
+def test_two_simultaneous_disconnected_signals_infer_a_second_occupant() -> None:
+    """SPEC.md §6.4: unbounded, evidence-driven multi-occupant disambiguation."""
+    engine = OccupancyEngine(_graph(("kitchen", "study")))  # not connected to each other
+
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+
+    assert engine.total_occupant_count(T0) == 2
+    assert engine.area_state("kitchen", T0).occupant_count == 1
+    assert engine.area_state("study", T0).occupant_count == 1
+
+
+def test_egress_departure_confirms_immediately() -> None:
+    """SPEC.md §6.5: egress activity from an occupied Area confirms without a pending window."""
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway",), (connector,)))
+    engine.process_signal(
+        AreaActivitySignal("entryway", T0, source="binary_sensor.entryway_motion")
+    )
+
+    left = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", left, source="binary_sensor.front_door")
+    )
+
+    entryway = engine.area_state("entryway", left)
+    assert entryway.occupant_count == 0
+    assert entryway.quality == StateQuality.CONFIRMED  # confirmed departure, not left ambiguous
+    assert engine.pending_transit_connector_ids(left) == frozenset()
+
+
+def test_egress_arrival_requires_corroboration() -> None:
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=60))
+    engine = OccupancyEngine(_graph(("entryway",), (connector,)), config)
+
+    opened = T0
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", opened, source="binary_sensor.front_door")
+    )
+    assert engine.area_state("entryway", opened).quality == StateQuality.AMBIGUOUS
+    assert engine.area_state("entryway", opened).occupant_count == 0
+
+    corroborated = opened + timedelta(seconds=10)
+    engine.process_signal(
+        AreaActivitySignal("entryway", corroborated, source="binary_sensor.entryway_motion")
+    )
+
+    entryway = engine.area_state("entryway", corroborated)
+    assert entryway.occupant_count == 1
+    assert entryway.quality == StateQuality.CONFIRMED
+
+
+def test_egress_arrival_without_corroboration_does_not_add_an_occupant() -> None:
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=30))
+    engine = OccupancyEngine(_graph(("entryway",), (connector,)), config)
+
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+
+    after_timeout = T0 + timedelta(seconds=31)
+    entryway = engine.area_state("entryway", after_timeout)
+
+    assert entryway.occupant_count == 0
+    assert engine.pending_transit_connector_ids(after_timeout) == frozenset()
+
+
+def test_two_pending_transits_from_the_same_source_do_not_double_drain_it() -> None:
+    """A source Area can only actually lose the one occupant that leaves it."""
+    to_hallway = GraphConnector("c1", "kitchen", "hallway")
+    to_study = GraphConnector("c2", "kitchen", "study")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway", "study"), (to_hallway, to_study)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s0"))
+
+    fired = T0 + timedelta(seconds=1)
+    engine.process_signal(ConnectorActivitySignal("c1", fired, source="s1"))
+    engine.process_signal(ConnectorActivitySignal("c2", fired, source="s2"))
+
+    confirm_hallway = fired + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", confirm_hallway, source="s3"))
+    # kitchen is now drained to 0; study's pending transit is now stale.
+    confirm_study = confirm_hallway + timedelta(seconds=1)
+    engine.process_signal(AreaActivitySignal("study", confirm_study, source="s4"))
+
+    assert engine.area_state("kitchen", confirm_study).occupant_count == 0
+    assert engine.area_state("hallway", confirm_study).occupant_count == 1
+    # study's stale pending transit was dropped rather than driving kitchen negative
+    # or fabricating an ungrounded arrival.
+    assert engine.area_state("study", confirm_study).occupant_count == 0
+    assert engine.total_occupant_count(confirm_study) == 1
+
+
+def test_connector_activity_rejects_unknown_connector() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    with pytest.raises(ValueError, match="Unknown connector"):
+        engine.process_signal(ConnectorActivitySignal("nope", T0, source="s1"))
+
+
+def test_all_area_states_covers_every_area() -> None:
+    engine = OccupancyEngine(_graph(("kitchen", "hallway")))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    states = engine.all_area_states(T0)
+
+    assert set(states) == {"kitchen", "hallway"}
+    assert states["kitchen"].occupant_count == 1
+    assert states["hallway"].occupant_count == 0
+
+
+def test_listener_is_called_on_every_processed_signal() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    calls = 0
+
+    def on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    engine.add_listener(on_change)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    assert calls == 1
+
+
+def test_listener_can_unsubscribe() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    calls = 0
+
+    def on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    remove = engine.add_listener(on_change)
+    remove()
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    assert calls == 0
+
+
+def test_new_area_has_no_provenance_yet() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    assert engine.area_state("kitchen", T0).last_provenance is None
+
+
+def test_direct_evidence_records_its_provenance() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    engine.process_signal(
+        AreaActivitySignal("kitchen", T0, source="s1", provenance=ProvenanceTier.AMBIGUOUS_PHYSICAL)
+    )
+
+    assert engine.area_state("kitchen", T0).last_provenance == ProvenanceTier.AMBIGUOUS_PHYSICAL
+
+
+def test_confirmed_transit_records_the_confirming_signals_provenance_on_both_areas() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    fired = T0 + timedelta(seconds=5)
+    engine.process_signal(ConnectorActivitySignal("c1", fired, source="s2"))
+
+    corroborated = fired + timedelta(seconds=10)
+    engine.process_signal(
+        AreaActivitySignal(
+            "hallway", corroborated, source="s3", provenance=ProvenanceTier.AMBIGUOUS_PHYSICAL
+        )
+    )
+
+    assert (
+        engine.area_state("kitchen", corroborated).last_provenance
+        == ProvenanceTier.AMBIGUOUS_PHYSICAL
+    )
+    assert (
+        engine.area_state("hallway", corroborated).last_provenance
+        == ProvenanceTier.AMBIGUOUS_PHYSICAL
+    )

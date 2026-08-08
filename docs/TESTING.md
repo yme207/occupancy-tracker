@@ -32,10 +32,13 @@ Confirmed 2026-08-08 (Phase 0): `homeassistant.runner` unconditionally imports t
 `fcntl` module. The moment `pytest-homeassistant-custom-component` is installed, pytest fails to
 even start on native Windows Python — not just for HA-integration tests, but for the whole run,
 since it's an autoloaded pytest plugin. This blocks test layers 2–5 (anything importing
-`pytest-homeassistant-custom-component`) locally on this development machine; layer 1 (pure-Python
-engine unit tests, no HA import) is unaffected and runs fine natively.
-CI (`ubuntu-latest`) is unaffected and remains the authoritative gate. See `docs/DECISIONS.md` for
-how local development handles this.
+`pytest-homeassistant-custom-component`) on native Windows Python; layer 1 (pure-Python engine unit
+tests, no HA import) is unaffected and runs fine natively.
+
+Resolved 2026-08-08 for local development: layers 2–5 run from a WSL2 (Ubuntu) venv instead — see
+`docs/STATUS.md`'s "Local testing environment" section for the exact commands and
+`docs/DECISIONS.md` for why. CI (`ubuntu-latest`) was never affected and remains the authoritative
+gate regardless.
 
 ## 2. Required tooling
 
