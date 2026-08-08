@@ -1,14 +1,15 @@
 """The Occupancy Tracker integration.
 
-Phase 6: registry sync, topology store, the occupancy engine, signal
-ingestion, provenance resolution, zone-presence fusion, and the
-sensor/binary_sensor entity platforms are all wired up — see docs/STATUS.md
-for exactly what that does and doesn't cover yet (notably: the engine's
-graph and signal ingestion's subscriptions are built once at setup from
-that moment's topology, not live-updated on later topology edits — SPEC.md
-§7.3 explicitly allows "immediately (or on next reload)"; an options-flow
-change *does* trigger a reload automatically). The topology editor's
-WebSocket API + frontend land in a later phase.
+Registry sync, topology store, the occupancy engine, signal ingestion,
+provenance resolution, zone-presence fusion, the sensor/binary_sensor entity
+platforms, the topology editor's WebSocket API (websocket_api.py), and its
+frontend panel (panel.py, www/) are all wired up — see docs/STATUS.md for
+exactly what that does and doesn't cover yet (notably: the engine's graph
+and signal ingestion's subscriptions are built once at setup from that
+moment's topology, not live-updated in-place on later topology edits —
+SPEC.md §7.3 explicitly allows "immediately (or on next reload)", and both
+an options-flow change and a websocket topology save trigger an automatic
+reload to deliver that).
 """
 
 from __future__ import annotations
@@ -22,9 +23,11 @@ from homeassistant.core import HomeAssistant, callback
 from .const import CONF_NEAR_HOUSE_ZONES, CONF_TRACKED_PERSONS
 from .engine_adapter import build_house_graph
 from .occupancy_engine import OccupancyEngine
+from .panel import async_setup as async_setup_panel
 from .registry_sync import RegistrySync
 from .signal_ingestion import SignalIngestion
 from .topology_store import TopologyStore
+from .websocket_api import async_setup as async_setup_websocket_api
 from .zone_fusion import ZoneFusion
 
 _PLATFORMS = (Platform.SENSOR, Platform.BINARY_SENSOR)
@@ -46,6 +49,14 @@ type OccupancyTrackerConfigEntry = ConfigEntry[OccupancyTrackerRuntimeData]
 
 async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEntry) -> bool:
     """Set up Occupancy Tracker from a config entry."""
+    # Hass-global, not per-entry — safe (and necessary) to call again on
+    # every reload, since it just re-registers the same command handlers.
+    async_setup_websocket_api(hass)
+    # Also hass-global, but *not* safe to repeat blindly (panel_custom
+    # raises on a duplicate frontend_url_path) — async_setup_panel guards
+    # itself with its own hass.data sentinel, see panel.py.
+    await async_setup_panel(hass)
+
     registry_sync = RegistrySync(hass)
     registry_sync.async_setup()
     entry.async_on_unload(registry_sync.async_unload)

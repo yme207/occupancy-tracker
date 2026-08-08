@@ -2,3 +2,10 @@ pytest
 pytest-homeassistant-custom-component
 ruff
 mypy
+# Required by the "frontend" component (a transitive dependency of our own
+# manifest.json's "panel_custom", used by panel.py). Not auto-installed by
+# pytest-homeassistant-custom-component. Version must match whatever
+# homeassistant/components/frontend/manifest.json's "requirements" pins for
+# the homeassistant core version pytest-homeassistant-custom-component
+# bundles — check that file if this ever needs bumping.
+home-assistant-frontend==20260729.6

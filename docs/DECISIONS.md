@@ -14,6 +14,169 @@ Format:
 
 ---
 
+## 2026-08-09 — SVG pan/zoom requires the viewBox and its container to share one fixed aspect ratio
+**Decision:** The topology panel's graph viewport (`.graph-wrap`) is pinned to a fixed CSS
+`aspect-ratio: 640 / 460`, and every computed SVG `viewBox` (`_computeViewBox()`, and the
+wheel-zoom handler) is kept at that exact same ratio (`VIEWPORT_ASPECT = 640 / 460`) at all times.
+**Why:** Found via live browser testing (project owner: "the zoom feels off... almost like it is
+panning as well as zooming"). Root cause: the container previously had a *fixed pixel height*
+(`460px`) with a *responsive width* (`100%` up to `640px`), while the viewBox was fit tightly to
+whatever Areas existed — the two almost never matched aspect ratio. SVG's default
+`preserveAspectRatio="xMidYMid meet"` responds to a mismatch by letterboxing (padding one axis to
+preserve the viewBox's own proportions) rather than stretching — which silently broke the
+screen-pixel-to-canvas-unit conversion (`viewBox.w / rect.width`) that the pan, zoom-to-cursor, and
+node-drag handlers all depend on, since that conversion is only valid when the rendered content
+truly fills `rect` on both axes. Locking both sides of the equation to the same ratio makes
+`viewBox.w / rect.width` exactly equal `viewBox.h / rect.height` always, eliminating the class of
+bug entirely rather than special-casing the letterbox math.
+**Alternatives considered:** Computing the actual `preserveAspectRatio` letterbox offset/scale and
+correcting for it in the coordinate math — technically possible but meaningfully more error-prone
+code for a problem a fixed aspect ratio avoids outright. Not verified in an automated test (no
+browser automation available this session) — this was caught and fixed through the project owner
+manually testing in a real browser, which is exactly the verification step `docs/STATUS.md` had
+flagged as still outstanding.
+
+## 2026-08-09 — Node layout: persisted per-area positions, draggable with grid-snap, plus auto-arrange
+**Decision:** `TopologyData` gained `area_positions: Mapping[str, tuple[float, float]]` (topology
+store schema 1.1 → 1.2, with a migration defaulting it to `{}` for older saved data). It's a pure
+display concern the engine/signal-ingestion/entity platforms never read. The panel lets a user drag
+any Area node (optionally snapping to a subtle, always-zoom-scaled dot grid), auto-saves the new
+position on drag-end, and offers a one-click "Auto-arrange" that computes a deterministic,
+overlap-free, floor-aware grid layout (Areas grouped by `floor_id`, bands ordered by the floor's own
+`level` — a new field added to `FloorSnapshot`/`_house_shape_json`, verified against
+`helpers/floor_registry.py`'s real `FloorEntry.level` — with unfloored Areas last) and saves it.
+**Why:** Directly requested by the project owner: both a "sort logically, no overlaps" auto-arrange
+*and* manual dragging with a subtle snap grid that scales with zoom. A force-directed/physics layout
+was considered and rejected as unnecessary complexity — a fixed-spacing per-floor grid is
+deterministic, trivially overlap-free by construction (verified with a standalone Node script
+checking pairwise node distances across several synthetic house shapes before shipping it), and
+"logical" in the specific sense the project owner asked for (grouped and ordered by floor). The grid
+"auto-scales with zoom" for free: it's drawn as SVG content in the same coordinate space as
+everything else, so it necessarily gets denser/sparser on screen exactly as the viewBox zooms,
+without any extra code.
+**Alternatives considered:** Making auto-arrange a non-destructive *preview* that doesn't overwrite
+saved positions until confirmed — rejected as unnecessary extra UI state for a v1; auto-arrange
+already only runs on explicit user action, and manual dragging afterward can always undo any
+individual placement. Per-node "auto vs. manual" mode flags — rejected in favor of the simpler
+"has a saved position, or doesn't" model `area_positions` already gives for free (an Area with no
+entry is auto-laid-out; dragging it just adds one).
+
+## 2026-08-09 — Topology save skips the entry reload when only positions changed
+**Decision:** `occupancy_tracker/topology/save` compares the incoming `connectors`/`egress_points`/
+`area_entity_selections` against what's currently stored before deciding whether to call
+`hass.config_entries.async_reload()` — a change to `area_positions` alone no longer triggers one.
+**Why:** The topology panel now saves on every node drag-end, to keep dragging feeling responsive
+with no explicit "Save" button (`docs/UX_GUIDELINES.md` §2, optimistic UI). The original "topology
+save always reloads" decision (see that entry above) was written before drag-to-reposition existed,
+when every save was an infrequent, deliberate structural edit. Reloading the whole config entry on
+every drag would mean the engine/signal-ingestion/entity platforms tear down and rebuild repeatedly
+for a field none of them ever read — pure churn, plus a real UX cost (a brief entities-unavailable
+window) for zero benefit.
+**Alternatives considered:** Debouncing the save call instead (wait until dragging settles, save
+once) — doesn't address the root issue, since even one reload per drag gesture is still unnecessary
+when nothing engine-relevant changed; the compare-before-reload approach fixes it for auto-arrange's
+many-positions-at-once save too, not just single-node drags.
+
+## 2026-08-08 — Vendor a self-contained Lit build instead of loading it from a CDN
+**Decision:** `www/vendor/lit-core.min.js` is a locally-built, fully self-contained ES module
+bundle (`LitElement`, `html`, `css`, `svg`, `nothing` — built via `esbuild --bundle --format=esm`
+from a two-line entry file re-exporting those names from the `lit` npm package, then verified to
+contain zero remaining `import`/`from` statements), committed into the repo and served by our own
+static path. The panel imports it via a relative path, never a CDN URL.
+**Why:** Put to the project owner as an explicit choice rather than assumed: many real Home
+Assistant installs are LAN-only or otherwise have no outbound internet access from the browser
+tab viewing them, and HA's own official custom-panel documentation example (which loads Lit from
+`unpkg.com`) would silently break the panel on exactly those installs with no useful error, only a
+blank page. A naive attempt at "bundling" via a CDN's own bundling query parameter
+(`esm.sh/lit@3?bundle`) still turned out to re-import a second chunk from the same CDN at runtime —
+not actually self-contained — so this needed a real local build, not just picking a different CDN
+URL.
+**Alternatives considered:** Load Lit from a CDN (`unpkg`/`jsdelivr`), matching HA's own docs
+example exactly — rejected for the offline/LAN-only breakage above. A plain-`HTMLElement`,
+no-framework implementation with hand-rolled DOM diffing — rejected as meaningfully more code and a
+manual re-render-correctness burden for no real benefit once a vendored bundle solves the
+offline concern. The vendored file needs to be manually rebuilt/re-committed on future Lit version
+bumps (no automatic update path) — accepted as the cost of the offline guarantee.
+
+## 2026-08-08 — Panel resolves its config entry via `config_entries/get`, not a baked-in id
+**Decision:** `www/topology-panel.js` calls the core `config_entries/get` websocket command
+(filtered to `domain: "occupancy_tracker"`) at load time to find this integration's entry id,
+rather than `panel.py` passing `entry_id` into the panel's static `config` at
+`panel_custom.async_register_panel()` registration time.
+**Why:** Panel registration is guarded to happen at most once per HA runtime (see the next entry) —
+if the entry id were baked in at that first registration and the user later removed and re-added
+the integration within the same running HA instance, the panel would keep calling
+`occupancy_tracker/topology/get` with a now-stale, nonexistent entry id, and every load would
+silently fail. Resolving it live avoids that entirely, at the cost of one extra websocket
+round-trip per panel load — negligible.
+**Alternatives considered:** Bake the entry id in at registration time — simpler, but has the
+stale-id failure mode above for a `single_config_entry: true` integration whose one entry can still
+be removed and re-added. Re-registering the panel (with a fresh config) on every entry setup instead
+of guarding against it — rejected, see the next entry for why that specifically can't work.
+
+## 2026-08-08 — Panel/static-path registration is guarded to run at most once per HA runtime
+**Decision:** `panel.py`'s `async_setup()` checks a `hass.data` sentinel and returns immediately if
+already set, before calling `hass.http.async_register_static_paths()` or
+`panel_custom.async_register_panel()`. It's still called unconditionally from every
+`async_setup_entry()` run (including every reload).
+**Why:** `async_setup_entry` re-runs on every config-entry reload, and Phase 7a's
+`occupancy_tracker/topology/save` deliberately triggers a reload on every successful save (see that
+phase's own reload decision). `panel_custom.async_register_panel()` calls
+`frontend.async_register_built_in_panel()` without `update=True` — a parameter `panel_custom`'s
+wrapper never exposes — and that function raises `ValueError` if the same `frontend_url_path` is
+already registered (verified directly from `frontend/__init__.py`). Without this guard, the very
+first topology save after setup would crash the reload it triggers. This mirrors the precedent set
+by `websocket_api.py`'s own registration (also hass-global, also re-invoked on every setup), except
+panel registration actually needs the explicit guard where websocket command registration didn't
+(overwriting a dict entry is naturally idempotent; `panel_custom.async_register_panel()` is not).
+**Alternatives considered:** Call `frontend.async_remove_panel()` in `entry.async_on_unload` and
+re-register fresh on every setup — works, but adds teardown/re-creation churn (and a brief window
+where the panel URL 404s) for a benefit — running config always reflecting "this setup's" state —
+that doesn't matter here, since the panel's own content is entirely dynamic per-load (see the
+previous entry) and never depends on anything fixed at registration time. Not implementing
+`async_remove_panel` at all (not even on integration removal) was accepted as an explicit, scoped
+gap, matching Phase 7a's websocket-command registration having the same property already.
+
+## 2026-08-08 — Topology save reloads the entry rather than live-patching the engine
+**Decision:** `occupancy_tracker/topology/save` validates and persists the new topology, sends the
+websocket result, and then calls `hass.config_entries.async_reload(entry.entry_id)`.
+**Why:** The engine's `HouseGraph` and signal ingestion's subscriptions are built once at
+`async_setup_entry` time from that moment's topology (Phase 4's documented scope limit), and
+`SPEC.md` §7.3 explicitly allows topology edits to take effect "immediately (or on next reload)."
+Reload is the mechanism that already exists for the second half of that allowance — Phase 6's
+options flow triggers one automatically on every options change — so reusing it for a topology save
+delivers a working "changes take effect" story today without duplicating Phase 4's setup wiring into
+some new live-patch path that would need its own correctness argument (partial teardown/rebuild of
+just the graph and signal subscriptions, while leaving registry sync/zone fusion/entities alone, is
+meaningfully more code than an entry reload and has more ways to leave the engine in an inconsistent
+state).
+**Alternatives considered:** A `rebuild()` method on the engine/signal-ingestion pair that patches
+the running instances in place without a full reload — would satisfy the "immediately" half of
+SPEC's allowance more precisely (no brief entities-unavailable window during reload), but is
+meaningfully more code and a new correctness surface for a benefit `SPEC.md` doesn't require today.
+Revisit if a reload's brief entity-unavailable window turns out to matter in practice once the
+frontend (Phase 7b) is actually driving this in a browser.
+
+## 2026-08-08 — Websocket API imports HA symbols from their defining submodule, not the aggregator
+**Decision:** `websocket_api.py` imports `ActiveConnection`, `ERR_NOT_FOUND`, `ERR_INVALID_FORMAT`,
+`websocket_command`, `require_admin`, and `async_response` directly from
+`homeassistant.components.websocket_api.{connection,const,decorators}`, rather than off the
+aggregating `homeassistant.components.websocket_api` package the way core integrations' own code
+does (e.g. `components/config/area_registry.py`).
+**Why:** `homeassistant.components.websocket_api/__init__.py` re-exports these via
+`from .connection import ActiveConnection  # noqa: F401`-style imports without declaring `__all__`.
+Under this project's `mypy --strict` config (`no_implicit_reexport` is part of `strict`), importing
+such a name off the aggregator and using it fails with "does not explicitly export attribute X."
+This doesn't affect HA core's own mypy run (their config apparently tolerates it, or the internal
+consumer files are treated differently), but it does affect ours checking against the installed
+package as a third-party dependency. Importing from the actual defining submodule — verified by
+reading `connection.py`/`const.py`/`decorators.py` directly, not guessed — sidesteps the re-export
+check entirely and is exactly as correct, since those are the real, stable locations these symbols
+are defined at.
+**Alternatives considered:** Suppressing with `# type: ignore[attr-defined]` at each call site —
+rejected as noisier than fixing the import path once, and it would hide a real "this symbol moved"
+signal if a future HA version actually changed where these live.
+
 ## 2026-08-08 — Zone fusion kept out of the engine's counting logic entirely
 **Decision:** `ZoneFusion` never calls into `OccupancyEngine` and never produces an engine `Signal`.
 Its two outputs — `house_zone_corroboration()` and `is_pre_armed()` — are read-only, surfaced as an

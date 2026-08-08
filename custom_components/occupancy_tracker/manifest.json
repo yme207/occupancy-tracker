@@ -3,6 +3,7 @@
   "name": "Occupancy Tracker",
   "codeowners": ["@yme207"],
   "config_flow": true,
+  "dependencies": ["http", "panel_custom", "websocket_api"],
   "documentation": "https://github.com/yme207/occupancy-tracker",
   "issue_tracker": "https://github.com/yme207/occupancy-tracker/issues",
   "integration_type": "helper",

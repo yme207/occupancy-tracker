@@ -34,10 +34,18 @@ _TRACKED_EVENTS = (
 
 @dataclass(frozen=True, slots=True)
 class FloorSnapshot:
-    """A Floor Registry entry, reduced to what this integration needs."""
+    """A Floor Registry entry, reduced to what this integration needs.
+
+    ``level`` (verified: `helpers/floor_registry.py`'s `FloorEntry.level`) is
+    the user's own floor ordering (e.g. -1 basement, 0 ground, 1 first) —
+    display-only, same as the rest of a Floor (docs/DECISIONS.md "Floors are
+    display-only"), but it's what lets the topology editor panel stack
+    floors top-to-bottom in the right order instead of an arbitrary one.
+    """
 
     floor_id: str
     name: str
+    level: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +143,9 @@ class RegistrySync:
         entity_registry = er.async_get(self._hass)
 
         floors = {
-            floor.floor_id: FloorSnapshot(floor_id=floor.floor_id, name=floor.name)
+            floor.floor_id: FloorSnapshot(
+                floor_id=floor.floor_id, name=floor.name, level=floor.level
+            )
             for floor in floor_registry.async_list_floors()
         }
 

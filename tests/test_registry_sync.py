@@ -41,7 +41,7 @@ async def test_area_and_floor_snapshot(
     area_registry: ar.AreaRegistry,
     floor_registry: fr.FloorRegistry,
 ) -> None:
-    floor = floor_registry.async_create("Ground Floor")
+    floor = floor_registry.async_create("Ground Floor", level=0)
     kitchen = area_registry.async_get_or_create("Kitchen")
     area_registry.async_update(kitchen.id, floor_id=floor.floor_id)
     hallway = area_registry.async_get_or_create("Hallway")  # no floor assigned
@@ -51,6 +51,7 @@ async def test_area_and_floor_snapshot(
 
     assert set(shape.floors) == {floor.floor_id}
     assert shape.floors[floor.floor_id].name == "Ground Floor"
+    assert shape.floors[floor.floor_id].level == 0
 
     assert set(shape.areas) == {kitchen.id, hallway.id}
     assert shape.areas[kitchen.id].name == "Kitchen"

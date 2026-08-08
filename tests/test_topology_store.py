@@ -14,6 +14,7 @@ from custom_components.occupancy_tracker.registry_sync import (
 )
 from custom_components.occupancy_tracker.topology_store import (
     STORAGE_VERSION_MAJOR,
+    STORAGE_VERSION_MINOR,
     Connector,
     EgressPoint,
     TopologyData,
@@ -61,6 +62,7 @@ async def test_save_and_load_roundtrip(hass: HomeAssistant) -> None:
         area_entity_selections=MappingProxyType(
             {"area_kitchen": ("binary_sensor.kitchen_motion",)}
         ),
+        area_positions=MappingProxyType({"area_kitchen": (12.5, -30.0)}),
     )
 
     writer = TopologyStore(hass, "entry-1")
@@ -83,13 +85,29 @@ async def test_different_entries_do_not_share_storage(hass: HomeAssistant) -> No
     assert store_b.topology == TopologyData()
 
 
-async def test_migrate_func_passes_through_same_major_version(hass: HomeAssistant) -> None:
+async def test_migrate_func_passes_through_current_minor_version(hass: HomeAssistant) -> None:
+    store = TopologyStore(hass, "entry-1")
+    raw = {
+        "connectors": [],
+        "egress_points": [],
+        "area_entity_selections": {},
+        "area_positions": {},
+    }
+
+    result = await store._store._async_migrate_func(
+        STORAGE_VERSION_MAJOR, STORAGE_VERSION_MINOR, raw
+    )
+
+    assert result == raw
+
+
+async def test_migrate_func_defaults_area_positions_for_pre_1_2_data(hass: HomeAssistant) -> None:
     store = TopologyStore(hass, "entry-1")
     raw = {"connectors": [], "egress_points": [], "area_entity_selections": {}}
 
-    result = await store._store._async_migrate_func(STORAGE_VERSION_MAJOR, 0, raw)
+    result = await store._store._async_migrate_func(1, 1, raw)
 
-    assert result == raw
+    assert result["area_positions"] == {}
 
 
 async def test_migrate_func_rejects_newer_major_version(hass: HomeAssistant) -> None:
@@ -185,6 +203,18 @@ async def test_reconcile_drops_selection_entity_moved_elsewhere(hass: HomeAssist
     cleaned, removed = store.reconcile(shape)
 
     assert cleaned.area_entity_selections == {}
+    assert removed
+
+
+async def test_reconcile_drops_node_position_for_missing_area(hass: HomeAssistant) -> None:
+    store = TopologyStore(hass, "entry-1")
+    store._topology = TopologyData(
+        area_positions=MappingProxyType({"kitchen": (1.0, 2.0), "hallway": (3.0, 4.0)})
+    )
+
+    cleaned, removed = store.reconcile(_house_shape(("hallway",)))
+
+    assert cleaned.area_positions == {"hallway": (3.0, 4.0)}
     assert removed
 
 
