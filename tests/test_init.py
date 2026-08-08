@@ -15,6 +15,7 @@ from homeassistant.helpers import area_registry as ar
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.occupancy_tracker import OccupancyTrackerRuntimeData
+from custom_components.occupancy_tracker.const import CONF_TRACKED_PERSONS
 from custom_components.occupancy_tracker.topology_store import Connector, TopologyData
 
 
@@ -44,6 +45,7 @@ async def test_setup_entry_creates_entities_for_each_area(
     assert hass.states.get("sensor.kitchen_occupant_count") is not None
     assert hass.states.get("binary_sensor.kitchen_occupied") is not None
     assert hass.states.get("sensor.total_occupant_count") is not None
+    assert hass.states.get("binary_sensor.pre_armed") is not None
 
 
 async def test_setup_entry_registry_sync_reacts_to_live_changes(
@@ -99,3 +101,25 @@ async def test_unload_entry_stops_registry_sync_listening(
     await hass.async_block_till_done()
 
     assert registry_sync.house_shape.areas == {}
+
+
+async def test_options_change_reloads_entry_and_zone_fusion_picks_it_up(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.zone_fusion.house_zone_corroboration().name == "UNKNOWN"
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_TRACKED_PERSONS: ["person.alice"]}
+    )
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    hass.states.async_set("person.alice", "home")
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.zone_fusion.house_zone_corroboration().name == "CORROBORATED"

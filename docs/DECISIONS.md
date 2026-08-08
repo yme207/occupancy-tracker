@@ -14,6 +14,96 @@ Format:
 
 ---
 
+## 2026-08-08 — Zone fusion kept out of the engine's counting logic entirely
+**Decision:** `ZoneFusion` never calls into `OccupancyEngine` and never produces an engine `Signal`.
+Its two outputs — `house_zone_corroboration()` and `is_pre_armed()` — are read-only, surfaced as an
+attribute on `sensor.total_occupant_count` and a new `binary_sensor.pre_armed`, and don't change any
+occupant count or quality tier the engine computes.
+**Why:** `SPEC.md` §6.7 is explicit and repeated: "zone presence alone must never silently change
+[the occupant count]," "doesn't by itself place someone in a specific Area," "should not increment
+the house occupant count." Two of the richer behaviors §6.7's prose describes — zone corroboration
+"helping resolve ambiguous transits," and `not_home` "decaying the confidence behind a stale
+occupant token" — would require identifying *which* occupant token a specific tracked person
+corresponds to. The engine's model is a per-Area integer count, not per-occupant identity (a
+deliberate Phase 3 choice, see that phase's "stale pending transits" decision) — there is no token
+for a zone signal to attach to. Implementing either behavior now would mean either quietly
+introducing per-token identity through the back door (a much larger redesign than this phase's
+scope) or building something that looks like it does what SPEC describes but doesn't actually
+resolve anything (e.g. corroboration nudging a pending transit's confirmation with no principled
+tie-break rule). Neither is better than clearly not implementing it yet.
+**Alternatives considered:** Adding a numeric "confidence" field to `AreaState` that zone
+corroboration nudges up/down — rejected as the same kind of ungrounded-numeric-threshold problem the
+Phase 5 "dropped `Signal.confidence`" decision already argued against; there's no principled value
+to nudge it by without a demonstrated need. Revisit both deferred behaviors together if/when a
+concrete reason to add per-token identity to the engine emerges (this would be a significant enough
+change to warrant its own dedicated design pass, not a rider on zone fusion).
+
+## 2026-08-08 — Near-house zone matching uses `in_zones`, not the legacy zone-name state string
+**Decision:** `classify_zone_membership()` determines "near-house zone" membership by checking the
+tracked entity's `in_zones` attribute (a list of real zone entity ids) against the user's configured
+near-house zone ids — it does not attempt to match the entity's plain `state.state` string against a
+zone's slug or name for this purpose.
+**Why:** Verified against real HA core source before assuming a match strategy (per `CLAUDE.md` rule
+1): traced `components/device_tracker/legacy.py`'s `async_update` (`self._state = zone_state.name`
+for a non-home zone) and confirmed via `components/person/__init__.py` that `person` entities copy
+their source tracker's `state.state` directly. `zone_state.name` is the zone's *display* name — an
+arbitrary string (could be "Front Yard", could be anything a user typed), not a stable slug
+guaranteed to match the zone entity's `object_id`. Reconstructing an entity_id from that string
+(e.g. `f"zone.{slugify(state.state)}"`) would be fragile and unverified guessing exactly like the
+API-invention failure mode `CLAUDE.md` rule 1 exists to prevent. `in_zones`
+(`DeviceTrackerEntityStateAttribute.IN_ZONES` / `PersonEntityStateAttribute.IN_ZONES`, both the
+string `"in_zones"`) instead carries actual zone entity ids directly — an exact, reliable match
+against the options flow's `EntitySelector(domain="zone")`-sourced configuration.
+**Alternatives considered:** String-matching `state.state` against zone names/slugs anyway —
+rejected as unreliably fragile per the above. Computing zone membership from GPS coordinates via
+`zone.async_active_zone()` — would require every tracked entity to expose `latitude`/`longitude`
+attributes, which connectivity-based (non-GPS) trackers don't have, so `in_zones` (which both GPS
+and connectivity-based *modern* trackers populate) is the more broadly applicable choice. **Known
+limitation, not fixed:** legacy trackers that report a zone name in `state.state` without an
+`in_zones` attribute won't be detected as "near house" by this integration. Not addressed now because
+`SPEC.md` §6.7's stated use case is specifically the companion app, which is `in_zones`-populating;
+see `docs/STATUS.md`'s Phase 6 open-follow-up note.
+
+## 2026-08-08 — Options flow: plain `OptionsFlow` subclass, not `SchemaConfigFlowHandler`
+**Decision:** The new options flow (`OccupancyTrackerOptionsFlow(OptionsFlow)`) is a hand-written
+class with an explicit `async_step_init`, added alongside the existing Phase 0 `ConfigFlow` via
+`async_get_options_flow` — not a rewrite of `config_flow.py` into the declarative
+`SchemaConfigFlowHandler` framework (`derivative`/`threshold` use this to combine config+options
+flows into one class from shared voluptuous schemas).
+**Why:** Phase 0 already deliberately chose the plain `ConfigFlow` style over
+`SchemaConfigFlowHandler` for the confirmation-only initial flow (see that phase's decision entry).
+Extending that same integration's options flow with `SchemaConfigFlowHandler` would mean restructuring
+the already-working, already-tested `ConfigFlow` class to fit that framework's combined shape —
+unnecessary churn to introduce a second flow-authoring style into one small integration, for a form
+with exactly two fields. The plain `OptionsFlow` subclass needs no restructuring of existing code,
+is simpler to read end-to-end without knowing the schema-flow framework's conventions, and is a
+fully current, non-deprecated HA pattern (confirmed via source: `OptionsFlow.config_entry` is
+auto-resolved by the framework in current HA core, no manual `__init__` storage needed —
+`OptionsFlowWithConfigEntry`, the older explicit-storage pattern, is the one HA core's own comments
+say "should not be referenced in new code").
+**Alternatives considered:** `SchemaConfigFlowHandler` — rejected per the above; would be worth
+adopting only if this integration's config/options surface grows enough fields/steps that hand-written
+flow classes become genuinely harder to maintain than the declarative alternative, which two fields
+does not.
+
+## 2026-08-08 — Options changes trigger an automatic config-entry reload
+**Decision:** `entry.add_update_listener(_async_reload_entry)` is registered during setup, so
+changing zone-fusion options (tracked persons, near-house zones) via the options flow immediately
+triggers `hass.config_entries.async_reload()` — unlike topology edits, which need a manual reload
+per the Phase 4 "or on next reload" precedent.
+**Why:** This is the standard, well-established HA pattern for options that affect setup-time wiring
+(verified: `ConfigEntry.add_update_listener` exists and takes an `UpdateListenerType =
+Callable[[HomeAssistant, ConfigEntry], Coroutine[Any, Any, None]]`). Unlike the topology snapshot
+(which changes via a not-yet-built live editor with no natural "save" moment to hook a reload to
+until Phase 7 exists), options-flow changes have an exact, well-defined completion event — the
+flow's final `async_create_entry` call — that HA core already surfaces as an update event. There's
+no reason to defer live-updating here the way Phase 4 deferred it for topology; the mechanism is
+already there and costs nothing extra to wire up.
+**Alternatives considered:** Requiring a manual reload for options changes too, for consistency with
+the topology precedent — rejected because the two cases aren't actually analogous (one has a clean
+reload hook available for free, the other doesn't yet), and forcing avoidable friction onto the user
+isn't a virtue in itself.
+
 ## 2026-08-08 — Provenance resolution: id-equality matching, not parent_id-chain walking
 **Decision:** `provenance.resolve_provenance()` matches a state change's `Context` against the
 known-automation-context set primarily by **`context.id` equality**, with `context.parent_id`

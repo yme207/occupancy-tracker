@@ -1,13 +1,14 @@
 """The Occupancy Tracker integration.
 
-Phase 4: registry sync, topology store, the occupancy engine, signal
-ingestion, and the sensor/binary_sensor entity platforms are all wired up —
-see docs/STATUS.md for exactly what that does and doesn't cover yet
-(notably: the engine's graph and signal ingestion's subscriptions are built
-once at setup from that moment's topology, not live-updated on later
-topology edits — SPEC.md §7.3 explicitly allows "immediately (or on next
-reload)"). Provenance resolution, zone-presence fusion, and the topology
-editor's WebSocket API land in later phases.
+Phase 6: registry sync, topology store, the occupancy engine, signal
+ingestion, provenance resolution, zone-presence fusion, and the
+sensor/binary_sensor entity platforms are all wired up — see docs/STATUS.md
+for exactly what that does and doesn't cover yet (notably: the engine's
+graph and signal ingestion's subscriptions are built once at setup from
+that moment's topology, not live-updated on later topology edits — SPEC.md
+§7.3 explicitly allows "immediately (or on next reload)"; an options-flow
+change *does* trigger a reload automatically). The topology editor's
+WebSocket API + frontend land in a later phase.
 """
 
 from __future__ import annotations
@@ -18,11 +19,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 
+from .const import CONF_NEAR_HOUSE_ZONES, CONF_TRACKED_PERSONS
 from .engine_adapter import build_house_graph
 from .occupancy_engine import OccupancyEngine
 from .registry_sync import RegistrySync
 from .signal_ingestion import SignalIngestion
 from .topology_store import TopologyStore
+from .zone_fusion import ZoneFusion
 
 _PLATFORMS = (Platform.SENSOR, Platform.BINARY_SENSOR)
 
@@ -35,6 +38,7 @@ class OccupancyTrackerRuntimeData:
     topology_store: TopologyStore
     engine: OccupancyEngine
     signal_ingestion: SignalIngestion
+    zone_fusion: ZoneFusion
 
 
 type OccupancyTrackerConfigEntry = ConfigEntry[OccupancyTrackerRuntimeData]
@@ -73,15 +77,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
     signal_ingestion.async_start(topology_store.topology)
     entry.async_on_unload(signal_ingestion.async_stop)
 
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=entry.options.get(CONF_TRACKED_PERSONS, []),
+        near_house_zone_ids=entry.options.get(CONF_NEAR_HOUSE_ZONES, []),
+    )
+    zone_fusion.async_start()
+    entry.async_on_unload(zone_fusion.async_stop)
+
     entry.runtime_data = OccupancyTrackerRuntimeData(
         registry_sync=registry_sync,
         topology_store=topology_store,
         engine=engine,
         signal_ingestion=signal_ingestion,
+        zone_fusion=zone_fusion,
     )
+
+    # Zone-fusion settings (which persons/zones) live in options, and the
+    # objects above are built from a snapshot of them at setup time — reload
+    # the whole entry when they change rather than trying to live-patch a
+    # running ZoneFusion instance (same "reload to pick up config changes"
+    # precedent as the topology snapshot above).
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
     return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEntry) -> None:
+    """Reload the entry when its options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEntry) -> bool:

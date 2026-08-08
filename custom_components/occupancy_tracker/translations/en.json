@@ -6,5 +6,17 @@
         "description": "Occupancy Tracker reads your rooms, devices, and entities directly from Home Assistant — there's nothing to configure here yet. Select Submit to add it, then use Configure afterwards to draw your room topology and set egress points."
       }
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Zone presence settings",
+        "description": "Optional: fuse companion-app/device-tracker zone presence with occupancy detection. Zone presence alone never changes a room's occupant count — it only corroborates confidence and can pre-arm automations ahead of confirmed arrival.",
+        "data": {
+          "tracked_persons": "People/device trackers to fuse",
+          "near_house_zones": "Zones that count as \"near the house\" for pre-arming"
+        }
+      }
+    }
   }
 }

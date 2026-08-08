@@ -5,15 +5,16 @@ sessions — keep it that way by updating it at the end of every session that ch
 
 ## Current phase
 
-**Phase 5 complete.** `docs/SPEC.md` (functional) and `docs/ARCHITECTURE.md` (technical) are the
+**Phase 6 complete.** `docs/SPEC.md` (functional) and `docs/ARCHITECTURE.md` (technical) are the
 agreed target design. The old prototype under `custom_components/occupancy_tracker/` predates this
 spec, does not conform to it, and should be treated as reference-only for "what not to do" (see
 `docs/DECISIONS.md`'s 2026-08-08 entry) — not as a starting point to patch. **The current
 `custom_components/occupancy_tracker/` is the new, spec-conformant scaffold**, and is now
 end-to-end functional: registry sync (Phase 1) → topology store (Phase 2) → occupancy engine
-(Phase 3) → signal ingestion + entity platforms (Phase 4) → provenance resolution (Phase 5) all wire
-together, verified by real integration tests. Zone fusion (Phase 6) and the topology editor's
-WebSocket API + frontend (Phase 7) — the actual way a user sets a real topology — don't exist yet.
+(Phase 3) → signal ingestion + entity platforms (Phase 4) → provenance resolution (Phase 5) →
+zone-presence fusion (Phase 6) all wire together, verified by real integration tests. The topology
+editor's WebSocket API + frontend (Phase 7) — the actual way a user sets a real topology — is the
+only functional gap left before this is usable against a real house; see Phase 8 for packaging.
 
 ## Build phases (planned order)
 
@@ -159,8 +160,36 @@ Work bottom-up: engine logic before HA glue, HA glue before the frontend that de
       really does get suppressed and a user/contextless one really does get tagged correctly, plus
       the existing end-to-end entity test extended to check the new `provenance` attribute.
       `ruff`/`mypy` clean on the CI-equivalent commands.
-- [ ] **Phase 6 — Zone-presence fusion.** `SPEC.md` §6.7 (corroboration + pre-arming, not direct
-      count changes).
+- [x] **Phase 6 — Zone-presence fusion.** `SPEC.md` §6.7, implemented deliberately *without*
+      touching the occupancy engine's per-Area counts — zone presence alone must never change them.
+      New `config_flow.py` options flow (a plain `OptionsFlow` subclass, not the
+      `SchemaConfigFlowHandler` framework — keeps the Phase 0 confirmation-only `ConfigFlow`
+      untouched; see docs/DECISIONS.md) lets the user pick which `person`/`device_tracker` entities
+      to fuse and which zones count as "near the house" (`SPEC.md` explicitly requires this be
+      user-picked, never auto-detected by proximity). New `zone_fusion.py`, mirroring
+      `provenance.py`'s split: `classify_zone_membership()` is a pure function classifying a
+      `State` as `HOME`/`NEAR_HOUSE`/`AWAY`, verified against real `person`/`device_tracker`
+      source (`components/person/__init__.py`, `components/device_tracker/legacy.py`) — notably,
+      the legacy free-text zone-*name* state value turned out too unreliable to match against
+      (could be any display string, not a stable slug), so near-house matching uses the modern
+      `in_zones` attribute (a list of real zone entity ids) instead, a decision logged in
+      DECISIONS.md along with its known limitation for legacy (non-`in_zones`) trackers.
+      `ZoneFusion` (stateful) derives two behaviors, both surfaced as inspectable attributes/entities
+      per `SPEC.md` §6.8, not by changing counting logic: `house_zone_corroboration()`
+      (CORROBORATED/CONTRADICTED/UNKNOWN — attribute on `sensor.total_occupant_count`) and
+      `is_pre_armed()` (a new house-level `binary_sensor.pre_armed`, push-updated, for automations
+      that want to trigger faster once genuine egress activity follows near-house zone entry).
+      "Help resolve ambiguous transits" and "decay a *specific* stale occupant's confidence" from
+      `SPEC.md` §6.7's prose were deliberately **not** implemented at this per-token granularity —
+      the engine tracks counts, not identified occupant tokens, so neither has a well-defined
+      implementation without a deeper redesign; logged as a known, documented scope limit rather
+      than guessed at. Options changes now trigger an automatic entry reload
+      (`entry.add_update_listener`) so this is the one piece of runtime config that *does*
+      live-update, unlike the topology snapshot (Phase 4's "or on next reload" precedent). 19 new
+      tests (103 total): pure zone-membership classification, corroboration/pre-arm state machine
+      behavior including window expiry, listener/unload lifecycle, and options-flow tests (form
+      shown, selections saved, defaults reflect current options, end-to-end reload-picks-up-new-
+      config). `ruff`/`mypy` clean on the CI-equivalent commands.
 - [ ] **Phase 7 — WebSocket API + visual topology editor frontend.** `SPEC.md` §7.3. The largest
       single chunk of remaining engineering effort — expect this phase to take multiple sessions,
       each a bounded sub-slice (e.g. "read-only graph render," then "editable connectors," then
@@ -213,17 +242,30 @@ Repair/Issue via `issue_registry`, or a diagnostic entity attribute) would fit t
 "explainability" goal (§7.3) better once there's a UI to show it in. Revisit at Phase 7 rather than
 building it speculatively now.
 
+## Open follow-up (not blocking) — Phase 6
+
+`house_zone_corroboration()`/`is_pre_armed()` don't yet feed back into anything automated — they're
+read-only, inspectable signals (an attribute and a binary sensor) that a *user's own* automations
+can consume, matching what `SPEC.md` §6.7 actually asks for ("enabling a lighting/unlock automation
+to trigger faster" describes a user-authored automation reacting to this integration's signal, not
+this integration driving HA services itself). `SPEC.md` §6.7's "help resolve ambiguous transits" and
+"decay a *specific* stale occupant's confidence" were explicitly not implemented — both need
+per-token occupant identity the engine's count-based model doesn't have (see docs/DECISIONS.md).
+Revisit only if a concrete per-token redesign is undertaken for other reasons; not worth building
+just for this.
+
+Near-house zone matching only works for trackers that populate the modern `in_zones` attribute
+(companion app and other GPS-based `TrackerEntity`-based integrations do; some legacy/router-based
+trackers don't). Documented in DECISIONS.md rather than worked around, since the primary spec'd use
+case (companion app) is unaffected.
+
 ## Next action
 
-Phase 6 — Zone-presence fusion (`SPEC.md` §6.7): consume `person`/`device_tracker` zone state as
-corroborating evidence, not direct room placement. Concretely: `zone.home` raises confidence in the
-current occupant total without placing anyone in a specific Area; a user-picked "near-house" zone
-(options-flow setting, doesn't exist yet — needs a minimal options flow addition) pre-arms
-automations ahead of confirmed egress activity but must never itself increment the occupant count;
-`not_home` with no recent egress activity should decay confidence in a stale occupant token, not
-zero a room out instantly. This plugs into `signal_ingestion.py` similarly to provenance (a new
-`ZoneSignal`-shaped input, or fused into confidence on existing Signals — worth deciding deliberately
-rather than defaulting) and needs its own scenario tests per `docs/TESTING.md` §1 (zone entry to a
-near-house zone followed by egress-point activity = pre-arm confirmed; zone = "home" alone =
-corroboration only, no room placement; zone = "not_home" with no egress = confidence decay, not
-instant removal).
+Phase 7 — WebSocket API + visual topology editor frontend (`SPEC.md` §7.3). The largest remaining
+chunk of engineering effort in this project — this is genuinely the piece nothing else can
+substitute for, since it's the only way a user actually *sets* a topology (Connectors, egress-point
+entity bindings, per-area entity selections) rather than an agent/test constructing one directly via
+`TopologyStore.async_save()`. Per `docs/STATUS.md`'s existing phase-8 note and
+`docs/AGENT_WORKFLOW.md` §2, treat this as multiple sessions, each a bounded sub-slice — a reasonable
+first slice is the WebSocket API commands alone (read current Area/topology state, save topology
+changes) with contract tests per `docs/TESTING.md` §1, *before* any frontend JS exists to call them.
