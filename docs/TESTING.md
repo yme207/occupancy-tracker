@@ -26,6 +26,17 @@ doesn't recur.
    verify the topology store reconciles correctly rather than silently corrupting saved state.
 5. **WebSocket API contract tests** for the topology editor's read/save commands.
 
+## 1a. Windows note: `pytest-homeassistant-custom-component` does not run natively
+
+Confirmed 2026-08-08 (Phase 0): `homeassistant.runner` unconditionally imports the Unix-only
+`fcntl` module. The moment `pytest-homeassistant-custom-component` is installed, pytest fails to
+even start on native Windows Python — not just for HA-integration tests, but for the whole run,
+since it's an autoloaded pytest plugin. This blocks test layers 2–5 (anything importing
+`pytest-homeassistant-custom-component`) locally on this development machine; layer 1 (pure-Python
+engine unit tests, no HA import) is unaffected and runs fine natively.
+CI (`ubuntu-latest`) is unaffected and remains the authoritative gate. See `docs/DECISIONS.md` for
+how local development handles this.
+
 ## 2. Required tooling
 
 - `pytest` + `pytest-homeassistant-custom-component` for layers 2–5.

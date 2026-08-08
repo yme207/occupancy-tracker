@@ -5,19 +5,26 @@ sessions — keep it that way by updating it at the end of every session that ch
 
 ## Current phase
 
-**Specification complete. No implementation code exists yet.** `docs/SPEC.md` (functional) and
-`docs/ARCHITECTURE.md` (technical) are the agreed target design. The old prototype under
-`custom_components/occupancy_tracker/` predates this spec, does not conform to it, and should be
-treated as reference-only for "what not to do" (see `docs/DECISIONS.md`'s 2026-08-08 entry) —
-not as a starting point to patch.
+**Phase 0 complete.** `docs/SPEC.md` (functional) and `docs/ARCHITECTURE.md` (technical) are the
+agreed target design. The old prototype under `custom_components/occupancy_tracker/` predates this
+spec, does not conform to it, and should be treated as reference-only for "what not to do" (see
+`docs/DECISIONS.md`'s 2026-08-08 entry) — not as a starting point to patch. **The current
+`custom_components/occupancy_tracker/` is the new, spec-conformant scaffold** (manifest + a
+confirmation-only config flow, no engine logic yet), not the old prototype.
 
 ## Build phases (planned order)
 
 Work bottom-up: engine logic before HA glue, HA glue before the frontend that depends on it.
 
-- [ ] **Phase 0 — Repo scaffolding.** `hacs.json`, `manifest.json` (with `config_flow: true`),
-      empty `config_flow.py`, CI workflow (`docs/TESTING.md` §3), `README.md`, `CHANGELOG.md`,
-      pre-commit/lint config. No functional code yet.
+- [x] **Phase 0 — Repo scaffolding.** `hacs.json`, `manifest.json` (`config_flow: true`,
+      `integration_type: helper`, `iot_class: calculated`, `single_config_entry: true` — all
+      verified against real HA core source, see `docs/DECISIONS.md`), confirmation-only
+      `config_flow.py` + `translations/en.json`, CI workflow (ruff, mypy, pytest, hassfest, HACS
+      validation), `README.md`, `CHANGELOG.md`, `pyproject.toml` (ruff/mypy config),
+      `.pre-commit-config.yaml`. `ruff check`, `ruff format --check`, and `mypy` all verified clean
+      locally; a manifest-sanity test suite (`tests/test_manifest.py`) verified passing locally.
+      hassfest and the HACS validation action have not been run locally (see note below) — they run
+      in CI on push. No occupancy-tracking logic yet — that starts at Phase 1.
 - [ ] **Phase 1 — Registry sync layer.** Read-only Area/Floor/Device/Entity model + live
       registry-update handling (`docs/ARCHITECTURE.md` §1.1). Unit + HA-integration tests.
 - [ ] **Phase 2 — Topology store.** Schema (versioned), persistence via `Store`, migration
@@ -49,8 +56,18 @@ Still open, from `SPEC.md` §13 — none block Phase 0–6:
 - Topology export/import as v1 or later — before Phase 8 service definitions.
 - Full HACS default-repository bar vs. custom-repository-first — before Phase 8.
 
+## Known environment constraint (blocks local testing from Phase 1 onward)
+
+`pytest-homeassistant-custom-component` cannot run on native Windows Python — `homeassistant.runner`
+unconditionally imports the Unix-only `fcntl` module, and since it's an autoloaded pytest plugin
+this breaks the whole pytest run, not just HA-touching tests (confirmed 2026-08-08, see
+`docs/TESTING.md` §1a). This machine has no WSL installed. Phase 0's pure-Python manifest test
+ran fine locally; **Phase 1 onward needs HA-integration tests (TESTING.md layer 2), which cannot be
+verified locally until this is resolved.** Options (needs project-owner decision, not yet made):
+WSL2 (needs admin rights + restart to install), a Docker/devcontainer-based workflow, or relying on
+GitHub Actions CI as the only place layer-2+ tests actually run (slower local iteration).
+
 ## Next action
 
-Start Phase 0 (repo scaffolding) once `git init` / GitHub repo creation is confirmed with the
-project owner — that's an explicit, separate step from this documentation work (see `SPEC.md`
-§12).
+Phase 1 — Registry sync layer. Before writing HA-integration tests for it, resolve the local
+testing constraint above with the project owner.

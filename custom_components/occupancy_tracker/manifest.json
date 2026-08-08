@@ -1,0 +1,12 @@
+{
+  "domain": "occupancy_tracker",
+  "name": "Occupancy Tracker",
+  "codeowners": ["@yme207"],
+  "config_flow": true,
+  "documentation": "https://github.com/yme207/occupancy-tracker",
+  "issue_tracker": "https://github.com/yme207/occupancy-tracker/issues",
+  "integration_type": "helper",
+  "iot_class": "calculated",
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

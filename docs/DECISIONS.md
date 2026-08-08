@@ -14,6 +14,45 @@ Format:
 
 ---
 
+## 2026-08-08 — Phase 0 scaffolding: manifest fields and config flow shape, verified against HA core source
+**Decision:** `manifest.json` uses `integration_type: "helper"` and `iot_class: "calculated"` (not
+`"entity"`/other options) — verified by reading the real `manifest.json` of HA core's `group` and
+`derivative` integrations directly from `home-assistant/core`, both of which are the closest
+existing analogues to Occupancy Tracker (an entity computed from other existing entities, not a
+new physical device or cloud service). `config_flow.py` uses the plain
+`class X(ConfigFlow, domain=DOMAIN)` pattern (not the newer `SchemaConfigFlowHandler`, which
+`derivative` uses but which is unnecessary complexity for a confirmation-only flow), verified
+against `home-assistant/core`'s `local_ip` integration source, itself. `manifest.json` sets
+`single_config_entry: true` (HA 2024.3+) so HA core blocks a second config entry automatically —
+no manual `_async_current_entries()` check needed in `config_flow.py`.
+**Why:** Every one of these was checked against real HA core source or developer docs before being
+written, per `CLAUDE.md` rule 1 — this is exactly the class of "plausible-sounding API" mistake
+that broke the v0 prototype.
+**Alternatives considered:** n/a — this entry exists to record what was verified and against what,
+not a design trade-off.
+
+## 2026-08-08 — Custom integrations must use translations/en.json, not strings.json
+**Decision:** The config flow's UI text lives in `custom_components/occupancy_tracker/translations/en.json`
+with full, flat English text. No `strings.json` file exists in the integration.
+**Why:** Verified against HA developer docs (`docs/internationalization/custom_integration/`):
+`strings.json` and the `[%key:...%]` core-translation-key placeholder syntax are **build-time-only
+features of Home Assistant core's own Lokalise pipeline** — a custom (HACS-distributed) integration
+never runs through that pipeline, so a `strings.json`-only integration silently shows raw
+translation keys instead of text in the UI. This is a well-documented, easy-to-hit trap for anyone
+copying patterns from HA core source (which does use `strings.json`) into a custom component — the
+exact "plausible but wrong for this context" failure mode `CLAUDE.md` rule 1 exists to catch.
+**Alternatives considered:** n/a — this is a hard platform requirement, not a design choice.
+
+## 2026-08-08 — HACS validation ignores the brand-assets check for now
+**Decision:** The `hacs/action` CI job passes `ignore: brands`, skipping the check that requires a
+submitted `home-assistant/brands` entry (icon/logo assets).
+**Why:** Brand-asset submission is part of the "full HACS default-repository bar" question in
+`SPEC.md` §13, explicitly deferred to before Phase 8. Custom-repository installs (the near-term
+distribution path) don't require it; failing CI on a Phase-8 concern from Phase 0 onward would be
+noise, not signal.
+**Alternatives considered:** Submitting brand assets now — rejected as premature; revisit when
+`SPEC.md` §13's HACS-submission-bar question is answered.
+
 ## 2026-08-08 — Near-house zones are user-picked
 **Decision:** Which HA zones count as "near the house" for pre-arming (`SPEC.md` §6.7) is an
 explicit user selection in the options flow, not auto-detected by proximity to `zone.home`'s

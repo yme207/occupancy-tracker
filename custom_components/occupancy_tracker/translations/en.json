@@ -1,0 +1,10 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Occupancy Tracker",
+        "description": "Occupancy Tracker reads your rooms, devices, and entities directly from Home Assistant — there's nothing to configure here yet. Select Submit to add it, then use Configure afterwards to draw your room topology and set egress points."
+      }
+    }
+  }
+}
