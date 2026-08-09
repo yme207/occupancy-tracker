@@ -704,28 +704,38 @@ but nothing in the panel let a user populate it, so a real house had zero real s
 deleting it outright, since it explains why Phase 7 briefly showed as "done but not really usable"
 in two consecutive sessions' status text.
 
-## Open follow-up (action item, not blocking further phase work) — added 2026-08-09
+## Open follow-up (action item, not blocking further phase work) — updated 2026-08-09
 
-**`manifest.json`'s `codeowners`/`documentation`/`issue_tracker` are an obvious
-`TODO-set-your-github-username` placeholder**, replacing a previous *real-looking* but wrong GitHub
-handle (`@yme207`) found during the Phase 8 requirements audit. Project owner explicitly chose to
-set up a real GitHub repo later rather than provide details now — **must be fixed before any HACS
-submission** (this will also need updating in `README.md`'s clone instructions once a real repo
-exists). Revisit alongside `SPEC.md` §13 Q3 (HACS submission bar).
+**`manifest.json`'s `codeowners`/`documentation`/`issue_tracker` are still a
+`TODO-set-your-github-username` placeholder** — but the assumption behind that placeholder has since
+been corrected. Earlier this session, `@yme207` (then present in these fields) was assessed as "a
+previous *real-looking* but wrong GitHub handle" and replaced with the placeholder, on the belief
+the project owner hadn't set up a real repo yet. When committing and pushing this session's work,
+`git remote -v` showed `origin` already pointing at `github.com/yme207/occupancy-tracker.git`, already
+synced, with 5+ prior real commits all authored by the project owner — **the project owner then
+directly confirmed `yme207` is in fact their real GitHub handle and this is their real repo.** So the
+original `@yme207` value wasn't stale after all; the placeholder swap was an overcorrection based on
+an unverified assumption. Still needs an explicit fix (put `@yme207`/the real repo URL back into
+`codeowners`/`documentation`/`issue_tracker`, and update `README.md`'s clone instructions to match) —
+not done automatically as part of this handoff since it touches attribution and felt worth a direct
+confirmation rather than assuming twice in a row. Revisit alongside `SPEC.md` §13 Q3 (HACS submission
+bar).
 
 ## Next action
 
 Both Phase 8 batches (requirements/UX audit fixes, then the live-testing-driven navigation/clutter/
-language fixes) are now built, tested, and browser-verified end to end. Remaining before Phase 8 can
-be considered done:
+language/graph-simplification fixes) are now built, tested, and browser-verified end to end, and
+**committed and pushed** to `origin/master` (`github.com/yme207/occupancy-tracker`, commit
+`0934218`, 2026-08-09). Remaining before Phase 8 can be considered done:
 
 1. The still-open `docs/UX_GUIDELINES.md` review items noted earlier (light/dark theme spot-checks on
    the quality chips, the noted-but-not-built UX ideas: setup-friction relief for entity selection,
    a detail-panel open/close transition).
 2. `SPEC.md` §13 Q3's HACS submission bar decision (custom-repository-first vs. pursuing the HACS
    default-repository listing).
-3. The `manifest.json` `codeowners`/`documentation`/`issue_tracker` placeholder (see "Open follow-up"
-   above) — blocked on the project owner setting up a real GitHub repo, not forgotten.
+3. The `manifest.json` `codeowners`/`documentation`/`issue_tracker` placeholder — **no longer blocked**
+   (the project owner confirmed `yme207`/this repo is real, see "Open follow-up" above), just needs
+   the actual edit plus a matching `README.md` update. Small, not yet done.
 4. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
    fixtures — never tried yet, worth doing before calling Phase 8 done.
 
