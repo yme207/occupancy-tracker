@@ -14,6 +14,488 @@ Format:
 
 ---
 
+## 2026-08-09 — Removed the synthetic "Outside" graph node and its edges entirely
+**Decision:** The topology panel no longer draws a shared "Outside" node or the dashed edges
+connecting every access-point Area to it. Access points are shown purely via the existing per-node
+dashed ring (`.node--egress`), now the sole visual cue, with the legend updated to describe it
+("Dashed ring = this room has an access point"). `OUTSIDE_ID`, `_defaultOutsidePosition()`, and all
+outside-node positioning/dragging logic were deleted from `topology-panel.js`. `_saveTopology()` now
+always sends `outside_position: null` rather than tracking a position for a node that no longer
+exists — the websocket save schema's `outside_position` field stays `vol.Required` but already
+accepts `None` (`_OUTSIDE_POSITION_SCHEMA = vol.Any(None, _AREA_POSITION_SCHEMA)`), so no backend
+change was needed at all; the field is simply unused going forward rather than removed via a storage
+migration.
+**Why:** Project owner flagged (with screenshots) that every access-point Area converging on one
+shared, arbitrarily-positioned "Outside" node produced messy crossing diagonal lines once a house had
+more than one or two access points, and asked what value the shared node actually added over just
+marking each access-point room individually. The engine's own `OUTSIDE` concept
+(`engine_adapter.build_house_graph()`'s synthesized outside-facing connector per egress point, used
+for asymmetric departure/arrival transit confirmation) is entirely independent of this UI node — it's
+derived straight from `egress_points`, never from anything the graph draws or from `outside_position`.
+The visual node had no other function (no detail panel, no state, click-to-drag only), so it was pure
+decoration duplicating information the per-node dashed ring already conveyed — and confusingly so,
+once a user's house has its own real "outside" Areas (e.g. a Front Yard/Back Yard the user created
+themselves), which now look like a second, competing representation of the same idea.
+**Alternatives considered:** Keeping the node but only drawing it once regardless of egress count
+(already how it worked) and just cleaning up the auto-layout to reduce line crossings — rejected,
+since the node itself added no information beyond what the dashed ring already shows; simplifying the
+data model (delete the node) is a clearer fix than better-arranging a node that shouldn't exist.
+Removing `outside_position` from the storage schema entirely — rejected as unnecessary churn (a new
+migration, a backend test update) for a field that's already harmless to leave unused; revisit only if
+schema cleanup is undertaken for other reasons.
+
+## 2026-08-09 — Connector/egress lines trimmed to node edge; live occupant count in active nodes
+**Decision:** `topology-panel.js`'s connector and egress-to-outside lines are now drawn between each
+node's circle *edge* (a new `pointTowardsEdge(from, to, radius)` helper computes the trimmed
+endpoint), not between the two node centers. Every active Area's node also now shows its live
+occupant count as a `<text>` label inside the circle, sourced from the same `_engineState` the detail
+panel's explainability inspector already subscribes to — no new backend call, no new subscription.
+**Why:** Project owner reported (with a screenshot) that a connector line was visibly cutting straight
+through a room's circle rather than stopping at its edge. Root cause: the line's endpoints were always
+the node centers, which only stays hidden inside the circle if the circle is fully opaque and painted
+on top — true in the common case, but not for a dimmed/inactive node (see the `.node--inactive` fix
+below) or any theme where `--card-background-color` isn't fully opaque. Trimming to the circle's edge
+removes the dependency on either of those assumptions rather than patching just the one case that was
+visibly broken. The occupant-count label was requested in the same message as a lower-friction way to
+see a room's current count without opening its detail panel — inactive/untracked nodes deliberately
+don't get one, matching this project's existing engine-vs-entity display split (an inactive node has
+no real entity backing a count, so showing "0" for it would misrepresent it as tracked-and-empty
+rather than not-tracked-at-all).
+**Alternatives considered:** Fixing only the `.node--inactive` opacity rule (see the entry immediately
+below) without also trimming the lines — rejected as treating a symptom rather than the cause; a
+translucent theme background could reproduce the same visible-line bug on an otherwise "fully active"
+node with no dimming involved at all.
+
+## 2026-08-09 — Real JS syntax checking is available after all: Node.js via the Windows path
+**Decision:** Frontend JS changes to `topology-panel.js` can now be syntax-checked with
+`node --check <file>` before shipping, using the Windows-side Node install reachable from WSL at
+`/mnt/c/Program Files/nodejs/node.exe` (or, from a plain Windows shell/Git Bash, just `node` — it's
+on the Windows `PATH`). Not on WSL's own `$PATH` (a separate environment), which is why earlier
+sessions concluded no Node.js was available at all and fell back to manual re-reading of every
+template-literal edit.
+**Why:** A real regression this session (see the entry directly below) shipped past manual review
+because nothing actually executed the file before it reached the browser. Once the bug was live,
+`node --check` caught it immediately and unambiguously — a five-second command that manual re-reading
+had already missed twice in a row. `pip install esprima` was tried first and produces a false
+positive on this file (its parser predates class-field syntax like `static properties = {...}`,
+which this file has used since Phase 7b-i) — worth remembering so a future session doesn't waste time
+on esprima again or wrongly distrust a real error it reports elsewhere in this file.
+**Alternatives considered:** Installing Node inside the WSL venv via `apt` — unnecessary now that a
+working install is already reachable at the path above; simpler to just call it by its full path (or
+add it to WSL's `$PATH` once, e.g. via `.bashrc`, if this comes up often enough to be worth the
+one-time setup).
+
+## 2026-08-09 — Fixed: a literal backtick inside a CSS comment broke the whole styles block
+**Decision:** `topology-panel.js`'s `static styles = css\`...\`` block is one single JS template
+literal (lit's `css` tag is just a function called on a tagged template — there's no special parsing
+that protects backtick characters inside a `/* CSS comment */` written inside it). A markdown-style
+inline-code backtick in a comment (`` `opacity` ``) terminated the literal early, and everything after
+it parsed as broken JS. Removed the backtick from that comment; `node --check` (see the entry above)
+now confirms clean syntax.
+**Why:** Shipped as part of the connector-line/occupant-count-label fix below, then found live by the
+project owner ("the Areas and connection window no longer loads... it is just blank") — a *fully*
+blank panel (not one of the panel's own coded loading/error/empty states) is the signature of the
+whole custom element failing to even parse, not a runtime logic bug; confirmed directly from HA's own
+server-side capture of the browser's console error (`frontend.js.modern` logs client JS errors that
+reach it) rather than guessed: `SyntaxError: unexpected token: identifier` at the exact broken line.
+**Alternatives considered:** None — this was a straightforward typo-class bug once actually diagnosed;
+the only real lesson is the tooling one captured in the entry above (verify before shipping, not just
+re-read).
+
+## 2026-08-09 — Topology panel UI/UX pass: legend placement, alignment fix, plain language
+**Decision:** In `topology-panel.js`'s main card: the graph legend (line/dashed-edge meaning) moved
+out of the top explainer text into a new `.graph-footer` block below the graph, alongside the
+caption; the caption's CSS `text-align: center` was removed so it aligns left like everything else on
+the card; quality/provenance labels and all card copy (subtitle, empty/loading/error states, section
+headings, checklist descriptions) were rewritten in plain language, matching the standard already
+applied to the options-flow translations (see the entry below). A new inactive-room notice (reusing
+the existing `.empty-topology-notice` style) was added to the detail panel for any Area with nothing
+selected, and inactive Area nodes are now visually dimmed in the graph (`.node--inactive`).
+**Why:** Project owner reviewed the panel live and sent an annotated screenshot: the legend text was
+mixed into the top explainer paragraph rather than living with the caption at the bottom, and
+alignment was inconsistent across the card (centered caption against an otherwise left-aligned
+layout) — both were real, specific, pointed-to defects, not general polish requests. The plain-
+language rewrite was requested separately but at the same time ("carry out a full ui and ux review of
+this page... apply same simplified language") — the same "assume no technical background" standard
+already used for the options-flow field descriptions. The inactive-room visual cue is required by the
+per-area entity pruning decision below: an Area that no longer has any entities needs a visible reason
+why, not just silently-missing sensors.
+**Alternatives considered:** Introducing a new synonym ("way outside") for "access point" while
+rewriting the legend — rejected mid-edit in favor of using "access point" consistently everywhere it
+already appeared elsewhere in the panel, since two terms for one concept adds confusion rather than
+removing jargon.
+
+## 2026-08-09 — Per-Area entities are created only for Areas the user has actually configured
+**Decision:** New `topology_store.active_area_ids(topology)` returns the set of Area ids with either
+a non-empty `area_entity_selections` entry or an `EgressPoint` — i.e., an Area the user has bound at
+least one piece of activity evidence or access-point entity to. `sensor.py`/`binary_sensor.py` now
+only construct `AreaOccupantCountSensor`/`AreaOccupiedBinarySensor` for Areas in that set. A new
+`__init__.py` helper, `_prune_inactive_area_entities()`, runs at every setup/reload and actively
+removes (`entity_registry.async_remove`, not just skips re-creating) any previously-registered
+per-Area entity whose Area has since dropped out of the active set — e.g., the user deselected its
+last piece of evidence. House-level entities (`sensor.total_occupant_count`,
+`binary_sensor.pre_armed`) are unaffected — they always exist. The occupancy **engine**'s own graph
+(`engine_adapter.build_house_graph()`) still includes every Area regardless of activity, unchanged —
+this decision only ever affects which HA entities get created, never what the engine reasons over
+(SPEC.md §5.1 permits a sensor-less Area as a valid pass-through node for transit inference). The
+topology panel gained a matching `_isAreaActive()` check so an inactive Area is visibly dimmed in the
+graph and its detail panel shows an explanatory notice instead of an empty checklist result.
+**Why:** Project owner feedback after using the panel on a real house: since Areas can't be "opted
+out" of the topology at all (every HA Area is a node), a house with many rooms produced a
+same-sized wall of `sensor.*_occupant_count`/`binary_sensor.*_occupied` entities regardless of whether
+the user had configured anything for most of them — "not efficient and unnecessary... this is good
+house keeping and avoids unnecessary clutter." Entity creation/removal naturally piggybacks on the
+pre-existing reload-on-topology-change mechanism (`TopologyStore.async_replace_topology()`'s
+`engine_relevant_change` check already triggers `hass.config_entries.async_reload()` whenever
+`area_entity_selections`/`egress_points` change), so no new live-patching machinery was needed.
+**Alternatives considered:** Leaving the entities registered but marking them "unavailable" —
+rejected per the project owner's explicit ask for the entities to be *removed*, not just hidden, once
+fully deselected; a registered-but-permanently-unavailable entity is exactly the clutter being
+complained about, just relabeled.
+
+## 2026-08-09 — Options-flow/service translations rewritten for non-technical users
+**Decision:** `translations/en.json`'s config/options-flow/services text was fully rewritten to avoid
+any assumption of technical or algorithmic background — e.g. `transit_confirmation_window` is now
+described in plain cause-and-effect terms ("this is how long it gives the next room to prove that
+guess right before giving up... turn this up if people in your home often take a while getting
+between rooms") rather than referencing internal mechanics.
+**Why:** Project owner read the live options form after the Phase 8 tunables batch shipped and gave
+explicit, direct feedback: "the language and explanation needs to assume the user doesn't have an
+understanding of the code or technical methods used by the algorithm... needs to dumb it down to
+simple concepts that they can understand." This is a durable standard, not a one-off — the same bar
+was applied to the topology panel's own copy in the UI/UX pass above.
+**Alternatives considered:** None — this was a direct, unambiguous correction of existing text rather
+than a design choice with real alternatives.
+
+## 2026-08-09 — Device registration + `homeassistant://` link restores a navigation path to the panel
+**Decision:** `__init__.py`'s `async_setup_entry` now registers one virtual `DeviceEntryType.SERVICE`
+device per config entry (`device_registry.async_get_or_create`), named "Occupancy Tracker," with
+`configuration_url=f"homeassistant://{DOMAIN}"`. The two house-level entities
+(`sensor.total_occupant_count`, `binary_sensor.pre_armed`) are now attached to this device via
+`DeviceInfo(identifiers={(DOMAIN, entry_id)})`.
+**Why:** Removing `config_panel_domain` (see the entry above) fixed the options flow but reopened a
+real gap the project owner then hit directly: "how do I navigate from the Occupancy Tracker screen to
+the Areas and connections panel, if it isn't in the sidebar? I would have thought there'd be a
+navigation path via the configuration interface?" With `config_panel_domain` gone, Settings → Devices
+& Services → Occupancy Tracker's gear icon now only opens the options form — there's no longer any
+link from that screen back to the topology panel except the (easily-missed, and not guaranteed
+present for every user's sidebar configuration) permanent sidebar entry. A Device's own page has a
+"Visit" link driven by `configuration_url`, and HA supports a `homeassistant://` scheme specifically
+for linking to an internal frontend route without making a real network request — verified from
+`device_registry.py`'s `CONFIGURATION_URL_SCHEMES = {"http", "https", "homeassistant"}` and real core
+usage (`homeassistant://config/backup` in the core `backup` component). This gives a second,
+always-present path back to the panel: Settings → Devices & Services → Occupancy Tracker → the device
+page → Visit.
+**Alternatives considered:** Re-adding `config_panel_domain` — rejected, since it makes the gear icon
+and the device-page link mutually exclusive with the options flow being reachable at all (that's the
+exact bug that was just fixed). A second, separate config entry purely to host a device — rejected as
+needless complexity when the existing entry can own a device directly.
+
+## 2026-08-09 — `manifest.json`'s `integration_type` changed from `helper` to `hub`
+**Decision:** `manifest.json`'s `integration_type` is now `"hub"`, not `"helper"` (set at Phase 0 and
+never revisited since).
+**Why:** Project owner reported being unable to find "Occupancy Tracker" at all under Settings →
+Devices & Services after successfully using it (topology panel and services both fully working) —
+not a "where's the gear icon" question but "I can't see it as an integration." Traced to the actual
+frontend source rather than guessed: `ha-config-integrations.ts` (the main "Integrations" tab)
+subscribes to config entries via `subscribeConfigEntries(hass, cb, { type: ["device", "hub",
+"service", "hardware"] })`; `ha-config-helpers.ts` (a separate "Helpers" tab) subscribes with `{
+type: ["helper"] }` — mutually exclusive sets, verified at the exact installed frontend version
+(`20260729.6`). An entry whose integration declares `integration_type: "helper"` **only** appears
+under Helpers, never under Integrations — so this wasn't a bug in the sense of broken code, but a
+year-old categorization choice that silently made the entire integration undiscoverable to anyone
+looking where `SPEC.md`/`README.md`/`STATUS.md` themselves all say to look ("Settings → Devices &
+Services → Add Integration"). Real HA "helper" integrations (`input_boolean`, `threshold`,
+`utility_meter`, `derivative`) are narrowly-scoped, produce one or a small tightly-related set of
+derived entities, and are typically created via the dedicated "+ Helper" flow rather than "Add
+Integration" — Occupancy Tracker (many entities across many rooms, a dedicated full-page topology
+panel as its primary configuration surface, its own services) doesn't fit that shape. `"hub"` is also
+`loader.py`'s own documented fallback (`manifest.get("integration_type", "hub")`) for an integration
+that doesn't specify one at all, reinforcing it as the safe, conventional default here.
+**Alternatives considered:** `"service"` (also shows on the main Integrations tab, so functionally
+equivalent for this bug) — no clear tie-breaker either way; `"hub"` was picked as the more
+conservative choice since it's HA's own default. Omitting `integration_type` entirely (also defaults
+to `"hub"` per the same fallback) — rejected in favor of setting it explicitly, so
+`test_manifest.py`'s existing `test_required_fields_present` (which asserts the key is present at
+all) keeps enforcing a deliberate choice rather than silent omission.
+
+## 2026-08-09 — Removed `config_panel_domain`: it made the options flow completely unreachable
+**Decision:** `panel.py`'s `async_register_panel()` call no longer passes `config_panel_domain=DOMAIN`.
+The topology panel remains reachable via its permanent sidebar entry (Phase 7b-ii); Settings →
+Devices & Services → Occupancy Tracker's gear icon now opens the options flow again, as it would for
+any integration that doesn't set this parameter.
+**Why:** Found during a Phase 8 requirements/UX audit (project owner's explicit request to check the
+whole product against `SPEC.md` and scrutinize the UI from an average user's perspective) that this
+session was adding options-flow tunables (household size hint, transit/confirmation windows) to a
+form that turned out to be **entirely unreachable from the Home Assistant UI**. Traced this to
+`config_panel_domain`, added in Phase 7b-i specifically so the "Configure" gear would open the
+topology panel instead of a form. Verified from the actual frontend source at the exact installed
+version (`home-assistant-frontend==20260729.6`, matched by git tag) rather than assumed:
+`ha-config-entry-row.ts` renders the gear as *either* a link to the config panel *or* the
+options-flow button — `configPanel && !stateText ? <link-to-panel> : item.supports_options ?
+<options-button> : nothing` — and the row's overflow ("...") menu has no separate "Options" entry as
+a fallback (`show-dialog-options-flow.ts` → `show-dialog-data-entry-flow.ts` confirms the options
+dialog is only ever opened via that one gear-icon code path, `fireEvent(element, "show-dialog", ...)`
+with no other trigger). This means the zone-fusion options flow (`tracked_persons`/
+`near_house_zones`, added Phase 6) has been silently unreachable through the normal UI since Phase
+7b-i shipped, and nothing since then happened to re-test that specific path — every subsequent
+session's browser verification focused on the topology panel itself.
+**Alternatives considered:** Reverse-engineer the frontend's internal `"show-dialog"` custom-event
+contract so the topology panel could open the options dialog itself with a button of its own —
+rejected: that event's payload (`dialogImport`, a dynamic-import function reference) is an
+undocumented internal implementation detail of the frontend's own settings pages, not a stable
+custom-panel API the way `hass.connection`/`hass.callWS` are (verified project convention, e.g. the
+live-subscription work earlier this session, is to build on documented contracts only) — building on
+it would risk exactly the kind of invented/unverified-API failure mode `CLAUDE.md` calls out as this
+project's worst historical failure mode, just one layer removed. Moving the tunables into the
+topology panel's own UI (a new websocket-backed settings section) was also considered — SPEC.md §7.3
+explicitly allows exposing tunables "here or in the options flow," but simply not suppressing the
+already-working, already-tested options flow is far less work for the same result, and is also more
+consistent with users' general HA experience (gear icon = settings form, sidebar = the big
+graphical tool) than the inverted setup `config_panel_domain` produced.
+
+## 2026-08-09 — Services (manual override, topology export/import) fill a real SPEC.md §8 gap
+**Decision:** `occupancy_tracker.set_occupant_count` is an **entity** service (registered via
+`entity_platform.async_get_current_platform().async_register_entity_service()` from `sensor.py`,
+targeting `AreaOccupantCountSensor` specifically) rather than a plain service taking an `area_id`
+field — the user picks the room via HA's own entity/target picker, the same idiom core's own
+`utility_meter.calibrate` uses (verified from its actual `sensor.py`/`services.yaml`). It calls a new
+`OccupancyEngine.override_occupant_count(area_id, count, now)`, which bypasses the latch/transit
+machinery entirely, clears any pending transit touching the Area (a manual correction is more
+authoritative than an unresolved automatic guess about the same Area), and tags the result
+`ProvenanceTier.USER_CONFIRMED`. `export_topology`/`import_topology` are plain (non-entity) services
+— `export_topology` is `supports_response=SupportsResponse.ONLY` (returns the topology as response
+data, verified this is a real, current `hass.services.async_register` capability, not assumed);
+`import_topology` takes a `selector.ObjectSelector()` field and reuses the exact validate/save/
+reload logic the websocket save command already had, via a new shared
+`topology_store.async_replace_topology()` (the old `websocket_api._topology_validation_errors` was
+promoted to a public `topology_store.validate_topology()` in the same move, so neither caller
+re-derives it — `docs/ARCHITECTURE.md`'s anti-duplication rule).
+**Why:** `SPEC.md` §8 explicitly requires both ("manual occupant-count override, topology
+export/import... registered via `hass.services.async_register` with a `services.yaml`") and neither
+existed at all before this session's requirements audit — a plain, unambiguous gap, not a judgment
+call.
+**A side effect worth noting**: moving the websocket save command's logic into a shared
+`async_replace_topology()` changed its exact timing slightly — the websocket `send_result` ack now
+arrives *after* any triggered reload completes, not before. This actually fixes a latent, previously
+unnoticed race: the topology panel's `_resubscribeEngineState()` (this session's earlier live-refresh
+work) fires right after receiving that ack, and could previously have re-subscribed to the
+about-to-be-replaced engine instance if the reload hadn't finished yet, silently going stale with
+nothing left to re-trigger a second resubscribe. Not treated as a bug fix in its own right (never
+observed/reported), just recorded here since it's a real behavior change from the refactor.
+**Alternatives considered:** A plain `area_id` field for `set_occupant_count` (rejected — an entity
+target is the more idiomatic, more discoverable HA pattern and avoids inventing a lookup users would
+need `entry_id`/`area_id` slugs for, which they generally don't know off-hand).
+
+## 2026-08-09 — Household-size hint surfaces as an attribute, never touches count inference
+**Decision:** `EngineConfig.household_size_hint: int | None` is *not* read anywhere in
+`OccupancyEngine`'s count-inference branches. It's surfaced purely as a new
+`exceeds_household_size_hint` boolean attribute on `sensor.total_occupant_count` (true when the
+current total exceeds the hint), computed in `sensor.py` from a new `OccupancyEngine.
+household_size_hint` read-only property.
+**Why:** `SPEC.md` §6.4 is unusually explicit and emphatic that this hint "must never reject or cap a
+count the evidence actually supports" — it's phrased almost as a warning against a plausible-sounding
+mistake. Wiring it into the engine's internal state machine at all — even just to affect a `quality`
+tier, not the count — was judged too risky: today's `StateQuality` enum (confirmed/latched/ambiguous)
+has a specific, narrow, already-tested meaning (freshness / pending-transit status), and overloading
+it with a second, unrelated "statistically unlikely" signal would blur that meaning and create a
+plausible path for some future change to accidentally start treating "over the hint" as "less real,"
+i.e. a de facto cap through the back door. A separate, clearly-named, purely observational attribute
+has no such path.
+**Alternatives considered:** A new `StateQuality` value or a numeric per-Area confidence score
+(rejected — larger engine surface change than SPEC.md's own "may be used" language justifies, and
+`SPEC.md` §6.4's example — "an unexplained 6th simultaneous occupant... lower confidence than a
+2nd" — is about the *house total*, which the chosen house-level attribute already covers directly).
+
+## 2026-08-09 — Entity friendly names via `entity_registry.async_get_full_entity_name`
+**Decision:** `registry_sync.py`'s `EntitySnapshot` gained a `name: str` field, computed as
+`entity_registry.async_get_full_entity_name(hass, entry) or entry.entity_id` — the same public,
+documented HA helper the frontend itself uses to compute an entity's display name (device + entity
+name composition, user overrides, `has_entity_name` handling all included for free), not a bespoke
+re-derivation of that logic.
+**Why:** Found during the Phase 8 UX audit as the single biggest "looks like a dev tool, not a Home
+Assistant feature" issue: the topology panel's entity checklists (access points, per-area selection)
+showed raw entity ids (`binary_sensor.bedroom_1_motion`) with no way to tell what a checkbox actually
+represented without cross-referencing Settings → Entities separately. `SPEC.md` §5.2's own example
+phrasing ("this motion sensor," "this TV," "this door contact") implies human-readable labels were
+always the intent.
+**Alternatives considered:** Re-deriving a display name from `entry.name`/`entry.original_name`
+directly in `registry_sync.py` (rejected — `async_get_full_entity_name` already handles device-name
+composition, `has_entity_name`, and prefixing correctly and is what the real HA UI itself calls; a
+bespoke version would inevitably drift from it in some edge case).
+
+## 2026-08-09 — `ha-checkbox` swap investigated, deliberately not made
+**Decision:** The topology panel's checklists still use plain `<input type="checkbox">` with custom
+CSS, not HA's native `ha-checkbox`/`ha-formfield`.
+**Why:** Raised in the Phase 8 UX audit as a "borrow HA's own components" (`UX_GUIDELINES.md` §1)
+finding. Investigated properly this time (a previous session's attempt gave up after an unreliable
+bundle-grep check) by fetching `ha-checkbox.ts` from the `home-assistant/frontend` repo at the exact
+tag matching this environment's installed `home-assistant-frontend` version (`20260729.6`) — found it
+now wraps `WaCheckbox`, a "Web Awesome" web component from a separate npm package
+(`@home-assistant/webawesome`), not the Material checkbox expected. Could not verify that
+component's event/property contract (does toggling fire a plain `change` event with `target.checked`,
+or something Shoelace/Web-Awesome-idiomatic like a `wa-change` custom event?) — that package's source
+wasn't reachable from here. Swapping without that verification risks silently breaking the working,
+tested, user-approved checklist interactions for a cosmetic-only gain, which is exactly the class of
+mistake `CLAUDE.md`'s hard rule 1 exists to prevent.
+**Alternatives considered:** None attempted — this is a "verify before proceeding" deferral, not a
+considered rejection. Revisit if a future session can reach the `@home-assistant/webawesome` source,
+or if HA's own devtools/docs publish the component's event contract directly.
+
+## 2026-08-09 — Per-area entity selection reuses the access-point checklist pattern verbatim
+**Decision:** The detail panel's "Selected entities" display (previously read-only) became an
+editable checklist over an Area's `entity_ids`, structurally identical to Phase 7b-iii's
+access-point checklist: `_setAreaEntitySelections`/`_toggleAreaEntitySelection` mirror
+`_setEgressEntities`/`_toggleEgressEntity` almost line-for-line, saving through the same existing
+`occupancy_tracker/topology/save` command. No backend or schema changes — `area_entity_selections`
+already existed and was already consumed by `signal_ingestion.py` since Phase 4.
+**Why:** This was flagged as an "Open follow-up" gap in the previous two sessions' `STATUS.md`:
+`SPEC.md` §5.2 requires a UI to pick which entities count as occupancy evidence per room, and
+without it a real house has zero signal anywhere — Connectors/access points/the explainability
+inspector all had editable UIs, but this one didn't, making the whole panel not actually usable
+end-to-end despite every other piece being done. The access-point checklist was the obvious template
+to reuse rather than design a new interaction pattern, since it already solved the identical UI
+problem (a per-Area checklist over that Area's entities, saved on every toggle).
+**Deliberately not made mutually exclusive with the access-point checklist:** an entity can appear
+checked in both lists at once (e.g. a door sensor could reasonably be both an access-point crossing
+sensor and general activity evidence for its own room). `websocket_api.py`'s save validation checks
+the two lists independently with no cross-list constraint, so inventing an exclusivity rule in the
+frontend that the backend doesn't enforce would just be UI complexity with no real backing.
+**Alternatives considered:** A single unified checklist with a third state or separate "evidence
+kind" per entity (rejected — over-engineered for what SPEC.md actually asks for, and the two
+concerns already have independent, working UI real estate in the same detail panel).
+
+## 2026-08-09 — Explainability inspector uses a push subscription, not poll-on-select
+**Decision:** The detail panel's live engine state (`occupancy_tracker/engine/get_state`) is backed
+by a second websocket command, `occupancy_tracker/engine/subscribe_updates`, that pushes a fresh
+snapshot on every `OccupancyEngine` signal via the existing `add_listener()` hook (the same one
+`sensor.py`/`binary_sensor.py` use). The panel subscribes exactly once per panel lifetime — not once
+per Area selection — via `hass.connection.subscribeMessage()`, and keeps whichever Area is currently
+selected in sync automatically as pushes arrive.
+**Why:** Project-owner live-testing feedback: toggling a device while a room's detail panel was open
+didn't update the panel's chips until it was deselected and reselected, because the original
+implementation only fetched engine state at selection time. A poll-on-an-interval fix was
+considered and rejected outright — `CLAUDE.md` hard rule 4 bans polling loops standing in for real
+subscriptions, and this integration already has a working example of the correct pattern
+(`OccupancyEngine.add_listener()` → entity push-updates) to extend rather than a poll to bolt on.
+Implemented the websocket-subscription side by verifying the exact contract against real source
+rather than recalling it from memory, since this is the first websocket-push (as opposed to
+websocket-request/response) command in this codebase: `connection.subscriptions[msg_id]` +
+`connection.send_event(msg_id, payload)` from HA core's `websocket_api/connection.py`, and
+`hass.connection.subscribeMessage(callback, msg, options)` from `home-assistant-js-websocket`'s
+`connection.ts` (callback fires only on subsequent push events, not the initial `result` — a
+one-shot `get_state` call is still needed for the first paint).
+**Cleanup correctness:** registered via *both* `connection.subscriptions[msg["id"]]` (fires on
+browser disconnect/explicit unsubscribe) and `entry.async_on_unload()` (fires on config-entry
+reload), guarded by a `nonlocal removed` flag so whichever fires first is a no-op for the other —
+a config-entry reload replaces the engine instance the listener was registered against, and the
+websocket connection itself outlives any single reload, so relying on only one of the two cleanup
+paths would leak a listener on a stale engine after every reload. The frontend also resubscribes
+unconditionally after every topology save, since a structural save triggers exactly that kind of
+reload.
+**Alternatives considered:** Polling `get_state` on an interval while a panel is open (rejected —
+banned pattern, see above). Re-fetching only the selected Area's state on a coarser timer (rejected
+for the same reason, and it wouldn't fix the underlying "stale until reselect" bug being reported,
+just shrink the staleness window).
+
+## 2026-08-09 — "Egress point" renamed to "Access point" in UI copy only
+**Decision:** User-facing text in the topology panel (detail-panel labels, legend, hints, empty-state
+copy) now says "access point" instead of "egress point". Internal naming — the `EgressPoint`
+dataclass, `egress_points`/`entity_ids` storage fields, the websocket schema, `occupancy_engine.py`'s
+"egress confirmation" logic, and `SPEC.md`/`ARCHITECTURE.md` — is unchanged and still says "egress".
+**Why:** Project-owner live-testing feedback: "egress" strictly means *leaving*, but this concept
+covers both arrival and departure (the engine's own asymmetric-confirmation logic treats them
+differently precisely because both directions matter) — "access point" matches what it actually
+does. A full rename was explicitly offered and declined for this session: it touches `SPEC.md` (the
+product source of truth), a persisted storage field name (would need a schema migration on top of
+the one this session already shipped for `outside_position`), and every test referencing
+`egress_points`/`EgressPoint` — real effort with real risk, not something to fold into a copy fix
+without a deliberate choice to do so.
+**Alternatives considered:** Full rename (offered, declined — see above, revisit later if wanted).
+Leaving "egress" in the UI too (rejected — the terminology genuinely is misleading to an end user,
+per the direct feedback that triggered this).
+
+## 2026-08-09 — "Outside" is a real, draggable, persisted node (`outside_position`, schema 1.2→1.3)
+**Decision:** `TopologyData` gained `outside_position: tuple[float, float] | None`, alongside
+`area_positions` (storage schema 1.2→1.3, with a migration defaulting it to `None`). The panel now
+tracks the synthesized "Outside" node's position the same way it tracks any Area's — draggable,
+grid-snappable, and included in `_computeViewBox`/"Fit view" — rather than recomputing a fresh
+position for it on every render. It's added to the tracked positions the moment the first access
+point is created and removed the moment the last one is removed, so a stale position never lingers
+to skew fit-view math for a node that isn't even being shown.
+**Why:** Project-owner live-testing feedback: Outside couldn't be repositioned at all, and "Fit
+view" clipped it since the view-fitting math never knew it existed — both were symptoms of the same
+root cause (Outside's position was purely derived at render time, never stored anywhere). A separate
+top-level field was needed rather than reusing `area_positions`, because that field's key must be a
+real Area (the websocket API validates every `area_positions` key against the live house shape) and
+Outside isn't one.
+**Alternatives considered:** Storing Outside's position keyed inside `area_positions` under a
+sentinel id — rejected, since it would require special-casing that one key out of the "must be a
+real Area" validation rather than just giving it its own field with no such constraint to begin
+with.
+
+## 2026-08-09 — Topology panel gets its own sidebar item, not just a Devices & Services entry point
+**Decision:** `panel.py`'s `async_register_panel()` call now passes `sidebar_title`/`sidebar_icon`,
+giving the panel a permanent, always-visible sidebar link, in addition to the existing
+`config_panel_domain`-based Devices & Services → Configure entry point.
+**Why:** Found via live browser testing — the project owner could not locate the integration under
+Settings → Devices & Services → Integrations at all (this integration's `manifest.json` declares
+`integration_type: "helper"`, which HA's own developer docs describe as the same category as
+`derivative`/`input_boolean`/`group` — those normally surface as named cards under the *Helpers*
+tab, not *Integrations*, but that didn't resolve the discoverability complaint either). Rather than
+keep chasing exactly which sub-tab a `helper`-type config entry is supposed to render under, or
+reconsidering `integration_type` itself (out of scope for this slice — it was a deliberate,
+verified Phase 0 choice), a sidebar item sidesteps the question entirely: the panel is HA's primary
+user-facing surface for this integration per `SPEC.md` §7.3 ("independently re-openable at any
+time"), so it deserves a first-class, unambiguous entry point regardless of how config-entry
+categorization happens to render elsewhere.
+**Alternatives considered:** Changing `integration_type` away from `"helper"` — rejected without
+re-verifying against source why `"helper"` was chosen originally (see this file's 2026-08-08 Phase 0
+entry); not something to change as a side effect of a discoverability bug fix. Digging further into
+`home-assistant-frontend`'s tab-filtering logic to fix the *root* categorization question — deferred
+as unnecessary once the sidebar item made the panel reliably reachable either way.
+
+## 2026-08-09 — Connector drawing: click-two-nodes-in-sequence, not drag-node-to-node
+**Decision:** Phase 7b-ii's connector-drawing interaction is a toolbar "Draw connector" mode: click
+one Area node, then another, to create a Connector between them (with a live dashed preview line
+following the pointer in between the two clicks); clicking the same node again, or pressing Esc,
+cancels. Removing a connector is hover-or-tap-to-reveal a small delete control at the edge's
+midpoint, plus a keyboard path (Tab to the edge, Enter/Delete/Backspace).
+**Why:** `docs/STATUS.md` had flagged this as an open design question worth resolving deliberately
+rather than guessing (drag vs. click-sequence). Node-dragging in this panel already means
+"reposition," so overloading drag with a second, conflicting meaning ("connect") would be ambiguous
+UX; a click sequence keeps the two gestures unambiguous, works identically on touch (no drag target
+precision needed), and is straightforwardly keyboard-accessible (`docs/UX_GUIDELINES.md` §6's
+accessibility-fallback requirement) in a way a drag-based connector tool is not. The live preview
+line during the click sequence keeps the "drawing a connection" feel `SPEC.md` §7.3 describes
+without requiring the commit gesture itself to be a drag.
+**Alternatives considered:** Drag-from-node-to-node (rejected: conflicts with existing
+reposition-drag, harder on touch, harder to make keyboard-accessible). A separate small connector
+"handle" on each node's edge that only *that* handle can be dragged from (rejected as unnecessary
+added complexity for a hand-rolled SVG canvas, given the click-sequence approach already satisfies
+the UX requirements without it).
+
+## 2026-08-09 — Connector line color and grid-dot alignment, fixed after live testing
+**Decision:** Connector/egress edges are now stroked with `rgba(var(--rgb-primary-color), 0.5)` (a
+translucent tint of the same color used for Area node outlines) instead of
+`var(--divider-color)`. The grid-dot pattern's dot moved from local `(cx=1, cy=1)` to `(cx=0, cy=0)`
+within its tile, and `_autoLayout()` now snaps its computed positions to `GRID_SIZE` when the grid
+toggle is on.
+**Why:** Live browser feedback: the grey divider-color line read as an unrelated, generic UI line
+rather than something connecting the (blue-outlined) rooms it's between — a lighter tint of the same
+primary color reads as "belongs to the same object system" instead. Separately, drawn connectors
+looked visibly offset from the background dot grid even with grid-snap on; root cause was two
+compounding bugs, not one: (1) the grid dot was drawn 1 unit off the tile's corner, while a
+grid-snapped node sits exactly on multiples of `GRID_SIZE` — moving the dot to the tile origin makes
+snapped coordinates and visible dots coincide exactly; (2) `AUTO_LAYOUT_CELL` (140) is not a multiple
+of `GRID_SIZE` (40), so an auto-arranged room was never actually grid-aligned in the first place
+regardless of the dot-position bug — fixed by snapping auto-arrange's own output when the grid
+toggle is on, so auto-arranged and manually-dragged nodes always agree with each other and with the
+dot grid, not just internally consistent with themselves. `--rgb-primary-color` was verified as a
+real HA theme token by grepping the installed `hass_frontend` bundle for it (found in multiple
+bundle chunks) rather than assumed from memory, per this project's HA-API verification rule (it
+technically isn't a Python-side HA API, but the same discipline applies to frontend theme contracts).
+
 ## 2026-08-09 — SVG pan/zoom requires the viewBox and its container to share one fixed aspect ratio
 **Decision:** The topology panel's graph viewport (`.graph-wrap`) is pinned to a fixed CSS
 `aspect-ratio: 640 / 460`, and every computed SVG `viewBox` (`_computeViewBox()`, and the

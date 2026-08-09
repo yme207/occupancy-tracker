@@ -66,6 +66,14 @@ class EntitySnapshot:
     device's area. This mirrors the precedence Home Assistant itself uses
     (entity_registry.py's ``_async_get_full_entity_name``: entity area_id
     wins, falling back to the linked device's area_id only when None).
+
+    ``name`` is the same human-readable display name HA's own UI would show
+    (device + entity name composition, user overrides, etc. — computed via
+    ``entity_registry.async_get_full_entity_name``, not re-derived here),
+    since the topology editor's entity checklists (SPEC.md §5.2) need to show
+    an average user something like "Kitchen Motion", not a raw entity_id.
+    Falls back to the entity_id itself only in the rare case a full name
+    can't be computed at all.
     """
 
     entity_id: str
@@ -74,6 +82,7 @@ class EntitySnapshot:
     platform: str
     disabled: bool
     hidden: bool
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +174,7 @@ class RegistrySync:
                 platform=entry.platform,
                 disabled=entry.disabled_by is not None,
                 hidden=entry.hidden_by is not None,
+                name=er.async_get_full_entity_name(self._hass, entry) or entry.entity_id,
             )
             if resolved_area_id is not None:
                 entity_ids_by_area.setdefault(resolved_area_id, []).append(entry.entity_id)

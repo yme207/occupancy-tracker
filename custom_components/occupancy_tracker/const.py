@@ -9,3 +9,17 @@ CONF_TRACKED_PERSONS = "tracked_persons"
 #: for pre-arming (SPEC.md §6.7 — explicitly user-picked, not auto-detected
 #: by proximity to zone.home's radius).
 CONF_NEAR_HOUSE_ZONES = "near_house_zones"
+#: Options-flow key: optional whole-house "typical household size" hint
+#: (SPEC.md §6.4, §7.2) — tunes confidence only, never caps the actual count.
+CONF_HOUSEHOLD_SIZE_HINT = "household_size_hint"
+#: Options-flow key: `EngineConfig.transit_confirmation_window` (SPEC.md §7.2's
+#: "transit confirmation/grace windows"), stored as a `selector.DurationSelector`
+#: dict (e.g. {"minutes": 1, "seconds": 30}), converted to a `timedelta` at
+#: entry setup.
+CONF_TRANSIT_CONFIRMATION_WINDOW = "transit_confirmation_window"
+#: Options-flow key: `EngineConfig.confirmed_freshness_window` (SPEC.md §7.2),
+#: same duration-dict storage as above.
+CONF_CONFIRMED_FRESHNESS_WINDOW = "confirmed_freshness_window"
+#: Options-flow key: `ZoneFusionConfig.pre_arm_window` (SPEC.md §6.7/§7.2),
+#: same duration-dict storage as above.
+CONF_PRE_ARM_WINDOW = "pre_arm_window"

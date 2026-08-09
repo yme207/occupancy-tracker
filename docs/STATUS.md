@@ -5,22 +5,32 @@ sessions — keep it that way by updating it at the end of every session that ch
 
 ## Current phase
 
-**Phase 7b-i complete and browser-verified (interactive area layout); connectors/egress editing are
-next.** `docs/SPEC.md` (functional) and `docs/ARCHITECTURE.md` (technical) are the agreed target
-design. The old prototype under `custom_components/occupancy_tracker/` predates this spec, does not
-conform to it, and should be treated as reference-only for "what not to do" (see `docs/DECISIONS.md`'s
-2026-08-08 entry) — not as a starting point to patch. **The current
-`custom_components/occupancy_tracker/` is the new, spec-conformant scaffold**, and is now end-to-end
-functional: registry sync (Phase 1) → topology store (Phase 2) → occupancy engine (Phase 3) → signal
-ingestion + entity platforms (Phase 4) → provenance resolution (Phase 5) → zone-presence fusion
-(Phase 6) → topology editor websocket API (Phase 7a) → a real, in-browser topology panel with
-pan/zoom, draggable+persisted+grid-snapped Area layout and floor-aware auto-arrange (Phase 7b-i) all
-wire together, verified both by real integration tests **and by the project owner actually using it
-in a browser this session** (see "Local dev Home Assistant instance" below — several real bugs only
-showed up there and are now fixed, see `docs/DECISIONS.md`'s 2026-08-09 entries). The panel still
-can't draw Connectors or flag egress points — that's Phase 7b-ii/iii — so this isn't usable
-end-to-end against a real house yet, but the layout/navigation foundation under it is now solid and
-confirmed working, not just unit-tested.
+**Phase 7 complete end-to-end and browser-verified. Phase 8 (polish & packaging) is now underway**:
+a full requirements-conformance pass against `SPEC.md` plus a UX audit against `docs/UX_GUIDELINES.md`
+(from an average-HA-user lens, at the project owner's explicit request) surfaced several real gaps —
+missing services, tunables that existed in code but were never reachable from the UI at all (one of
+them, a `config_panel_domain` side effect, made the *existing* options flow completely unreachable
+too, not just the new tunables — see `docs/DECISIONS.md`'s 2026-08-09 entry), and some rough UX edges
+— all now fixed; see the new Phase 8 entry below for the full list. `docs/SPEC.md` (functional) and
+`docs/ARCHITECTURE.md` (technical) are the agreed target design. The old prototype under
+`custom_components/occupancy_tracker/` predates this spec, does not conform to it, and should be
+treated as reference-only for "what not to do" (see `docs/DECISIONS.md`'s 2026-08-08 entry) — not as
+a starting point to patch. **The current `custom_components/occupancy_tracker/` is the new,
+spec-conformant scaffold**, and is now genuinely usable end-to-end against a real house: registry
+sync (Phase 1) → topology store (Phase 2) → occupancy engine (Phase 3) → signal ingestion + entity
+platforms (Phase 4) → provenance resolution (Phase 5) → zone-presence fusion (Phase 6) → topology
+editor websocket API (Phase 7a) → a real, in-browser topology panel with pan/zoom,
+draggable+persisted+grid-snapped Area/Outside layout, floor-aware auto-arrange, a permanent sidebar
+entry point, editable Connectors, editable access points, a live-refreshing explainability inspector,
+an editable per-area entity-selection checklist (Phase 7b-i through 7b-v), and now (Phase 8) manual
+occupant-count override/topology backup services, user-tunable confidence windows, and entity
+friendly names throughout the panel all wire together, verified both by real integration tests **and
+by the project owner actually using it in a browser this session** (see "Local dev Home Assistant
+instance" below). Everything §5.2/§7.3 describes — picking which entities count as occupancy
+evidence, drawing/flagging topology graphically, and inspecting live engine state per Area — works
+and is confirmed working, not just unit-tested. A real house with real Areas and real sensors can now
+be fully configured and tuned through the panel and its options flow alone, with no house-specific
+data hardcoded and no manual `.storage` editing required, matching `SPEC.md` §7.4.
 
 ## Build phases (planned order)
 
@@ -196,7 +206,7 @@ Work bottom-up: engine logic before HA glue, HA glue before the frontend that de
       behavior including window expiry, listener/unload lifecycle, and options-flow tests (form
       shown, selections saved, defaults reflect current options, end-to-end reload-picks-up-new-
       config). `ruff`/`mypy` clean on the CI-equivalent commands.
-- [~] **Phase 7 — WebSocket API + visual topology editor frontend.** `SPEC.md` §7.3. The largest
+- [x] **Phase 7 — WebSocket API + visual topology editor frontend.** `SPEC.md` §7.3. The largest
       single chunk of remaining engineering effort — being taken as multiple bounded sub-slices.
   - [x] **Phase 7a — WebSocket API.** New `websocket_api.py`: two commands,
         `occupancy_tracker/topology/get` (read-only; returns the live house shape — areas, floors,
@@ -228,7 +238,7 @@ Work bottom-up: engine logic before HA glue, HA glue before the frontend that de
         topology; unknown `entry_id` → `not_found`; save persists, reloads, and is reflected in the
         reloaded `runtime_data`; save rejects an unknown-area reference (topology left untouched);
         save is rejected for a non-admin user. `ruff`/`mypy` clean on the CI-equivalent commands.
-  - [~] **Phase 7b — Frontend panel.** Being taken as its own bounded sub-slices in turn.
+  - [x] **Phase 7b — Frontend panel.** Taken as its own bounded sub-slices, all now complete.
     - [x] **Phase 7b-i — Panel registration + interactive area layout.** New `panel.py`: serves
           `custom_components/occupancy_tracker/www/` as a static path
           (`hass.http.async_register_static_paths`) and registers a `panel_custom` panel
@@ -305,19 +315,254 @@ Work bottom-up: engine logic before HA glue, HA glue before the frontend that de
           `ruff`/`mypy` clean on the CI-equivalent commands. Connector-drawing/egress-flagging UI
           (`SPEC.md` §7.3's actual "draw a line between two rooms" interaction) is still not built —
           that's Phase 7b-ii next.
-    - [ ] **Phase 7b-ii — Editable connectors.** Draw/remove Connector edges between Area nodes in
-          the graph (e.g. drag from one node to another, or click two nodes in sequence — not yet
-          decided which interaction reads better; worth a quick look at how similar HA/HACS graph
-          editors do it before committing), calling `occupancy_tracker/topology/save`; optimistic UI
-          updates per `docs/UX_GUIDELINES.md` §2. Node-position persistence (the thing this was
-          previously blocked on) is done — see Phase 7b-i above.
-    - [ ] **Phase 7b-iii — Egress-point flagging UI.** Mark an Area as an egress point and pick its
-          crossing entity/entities from that Area's entity list, from the graph.
-    - [ ] **Phase 7b-iv — Explainability inspector.** Extend the detail panel to show live signals,
-          confidence tier, and transit reasoning for a selected Area (`SPEC.md` §7.3) — needs a new
-          read-oriented websocket command exposing `OccupancyEngine` state, which doesn't exist yet.
-- [ ] **Phase 8 — Polish & packaging.** Full `docs/UX_GUIDELINES.md` pass, HACS submission
-      readiness (`SPEC.md` §13 Q6 needs answering before this phase), documentation finalization.
+    - [x] **Phase 7b-ii — Editable connectors.** A new "Draw connector" toolbar mode: click one Area
+          node then another to create a Connector (live dashed preview line follows the pointer
+          in between; click the same node again or press Esc to cancel), calling the existing
+          `occupancy_tracker/topology/save` command — no backend changes needed, Phase 7a's schema/
+          validation already fully supported connectors. Removing one is hover-or-tap-to-reveal a
+          small delete control at the edge's midpoint, plus a keyboard path (Tab to the edge,
+          Enter/Delete/Backspace) per `docs/UX_GUIDELINES.md` §6. Click-sequence rather than
+          drag-node-to-node was a deliberate choice (see `docs/DECISIONS.md`) — node-drag already
+          means "reposition" in this panel, so a second drag-based meaning would be ambiguous, and a
+          click sequence works identically on touch and is straightforwardly keyboard-accessible.
+          Duplicate connectors between the same pair of areas are silently skipped rather than
+          rejected with an error (there's no meaningful reason to have two identical edges). All
+          saves reuse the existing optimistic-update pattern node-dragging already established.
+          **Verified live in the project owner's browser this session**, which also surfaced three
+          real issues beyond the connector feature itself, now fixed (see `docs/DECISIONS.md`'s
+          2026-08-09 entries): (1) the panel had no discoverable entry point — it now has a
+          permanent sidebar item, not just a Devices & Services → Configure path; (2) connector/
+          egress lines used a generic grey (`--divider-color`) instead of relating visually to the
+          Area nodes' own color — now a translucent tint of `--primary-color`; (3) grid-snapped
+          connectors visually didn't line up with the background dot grid — root cause was two
+          separate bugs (the grid dot was drawn 1 unit off its tile's corner, and `AUTO_LAYOUT_CELL`
+          not being a multiple of `GRID_SIZE` meant auto-arranged nodes were never actually
+          grid-aligned even before this slice). No new Python beyond `panel.py`'s two new
+          `async_register_panel()` kwargs (`sidebar_title`/`sidebar_icon`) — `ruff`/`mypy` clean, all
+          115 existing tests still pass (`test_panel.py` failed once in isolation due to an
+          unrelated test-ordering artifact — passes cleanly as part of the full suite, which is the
+          authoritative signal). No Python-testable surface for the JS itself, per
+          `docs/TESTING.md` — verification was manual in-browser, per `CLAUDE.md`'s UI rule.
+    - [x] **Phase 7b-iii — Access-point flagging UI.** (Internally still `EgressPoint`/
+          `egress_points` — the rename to "access point" is UI-copy-only this session, see
+          `docs/DECISIONS.md`.) No graph-wide toolbar mode needed, unlike connectors — it's a
+          per-area concern, so it lives entirely in the existing click-to-inspect detail panel: a
+          checklist of that Area's entities, where checking one immediately makes the Area an access
+          point (an Area *is* one exactly when it has a non-empty crossing-entity list, matching the
+          backend's own validation — no separate on/off flag to keep in sync). Unchecking the last
+          one removes it. No backend changes needed for this part — Phase 7a's schema/validation
+          already fully supported it. Fixed two more real bugs surfaced by live testing (see
+          `docs/DECISIONS.md`): the synthesized "Outside" node couldn't be repositioned and was
+          clipped by "Fit view", both because its position was purely computed at render time and
+          never actually stored anywhere — it's now a real, draggable, persisted node like any Area,
+          which needed a small backend addition (`outside_position`, storage schema 1.2→1.3 with a
+          migration, a new websocket field, `ruff`/`mypy` clean, 2 new tests, all 117 tests passing).
+          **Verified live in the project owner's browser this session.**
+    - [x] **Phase 7b-iv — Explainability inspector.** Two new read-oriented websocket commands in
+          `websocket_api.py`: `occupancy_tracker/engine/get_state` (one-shot snapshot) and
+          `occupancy_tracker/engine/subscribe_updates` (push updates), both serializing
+          `OccupancyEngine` state via a new `_engine_state_json()` helper — per-Area occupant count,
+          `StateQuality`/`ProvenanceTier` (by `.name`, matching the existing entity-attribute
+          convention), `last_confirmed` (ISO, via `dt_util`), and any pending transit (source area,
+          other side, deadline). `OccupancyEngine` gained a public `graph` property so the websocket
+          layer can resolve a pending transit's other-side Area without duplicating graph-construction
+          logic. The detail panel renders this as a quality chip, occupant count, "last confirmed"
+          relative time (`Intl.RelativeTimeFormat`), and pending-transit reasoning in plain language.
+          **Live-refresh, not poll-on-select:** the panel subscribes once per panel lifetime (not
+          per-Area-selection) via `hass.connection.subscribeMessage()` — verified against real
+          `home-assistant-js-websocket`/HA-core source, since this integration had no existing
+          subscription-pattern example to copy. `subscribe_updates` registers cleanup in
+          `connection.subscriptions` *and* via `entry.async_on_unload()` (idempotent, guarded by a
+          `nonlocal removed` flag) so it tears down correctly whichever happens first — a browser
+          disconnect or a config-entry reload (the websocket connection outlives any single reload,
+          so only the latter actually exercises `async_on_unload`). The panel also
+          resubscribes unconditionally after every topology save, since a save can trigger a reload
+          that replaces the engine instance out from under an existing subscription.
+          **Project-owner live-testing feedback this session**: the detail panel's chips didn't
+          refresh when a device was toggled while a room was already selected — it only updated on
+          unselect/reselect, because the original implementation fetched state once per selection
+          rather than subscribing. Fixed by the live-subscription mechanism above; **confirmed working
+          in the browser** (toggling a room's `input_boolean` while its detail panel is open now
+          updates the quality chip/occupant count/pending-transit text immediately, no reselect
+          needed). To support this and future live testing, also added real per-room test fixtures to
+          the dev instance (`docs/STATUS.md`'s dev-instance section below): a motion `input_boolean`
+          and a light `input_boolean` for each of the 9 internal rooms, each assigned to its Area and
+          wired into that Area's entity selection, plus a single YAML dashboard grouping them by room
+          alongside the house-level total/pre-armed sensors — replacing the single fake
+          `input_boolean.egress_test` (which the project owner caught was registry-only and
+          untoggleable) with genuine, real, toggleable entities. 5 new tests (122 total):
+          `get_state`'s area/pending-transit/unknown-entry-id cases, and the subscribe command's
+          push-on-signal and stops-after-reload lifecycle cases. `ruff`/`mypy` clean on the
+          CI-equivalent commands.
+    - [x] **Phase 7b-v — Per-area entity-selection UI (`SPEC.md` §5.2).** The gap flagged as an
+          "Open follow-up" after Phase 7b-iii/iv: `area_entity_selections` was fully wired end-to-end
+          on the backend since Phase 4 (`signal_ingestion.py` already subscribed to whatever was in
+          it), but nothing in the panel let a user populate it. Fixed with no backend changes at all
+          — purely a frontend addition reusing the exact same pattern Phase 7b-iii's access-point
+          checklist established: the detail panel's previously read-only "Selected entities" list is
+          now an editable "Activity evidence" checklist over that Area's `entity_ids`
+          (`_setAreaEntitySelections`/`_toggleAreaEntitySelection`, mirroring
+          `_setEgressEntities`/`_toggleEgressEntity`), saved via the existing
+          `occupancy_tracker/topology/save` command. Deliberately independent of the access-point
+          checklist rather than mutually exclusive with it — the backend places no exclusivity
+          constraint between the two lists (an entity, e.g. a door sensor, can legitimately be both
+          an access-point crossing sensor and general activity evidence for its room), so the UI
+          doesn't invent one either. No new tests (no Python surface changed); `ruff`/`mypy` clean,
+          all 122 existing tests still pass. **Verified live in the project owner's browser this
+          session**: checked entities persist across refresh, and toggling a now-selected
+          `input_boolean` actually produces occupant-count/quality-chip changes for that room where
+          it previously wouldn't have. This was the last missing piece for a real house to be
+          configurable through the panel alone — Phase 7 is now complete end-to-end.
+- [~] **Phase 8 — Polish & packaging.** Kicked off with a full requirements-conformance pass against
+      `SPEC.md` and a UX audit against `docs/UX_GUIDELINES.md` (project owner's explicit request:
+      "scrutinised for usability, relevance and simplicity" from an average-HA-user's point of view,
+      and the whole product checked against the original requirements). Found and fixed real gaps:
+      - **Missing services (SPEC.md §8), now built**: `occupancy_tracker.set_occupant_count` (an
+        entity service on the per-Area occupant-count sensor, via
+        `entity_platform.async_register_entity_service` — verified pattern, mirrors core
+        `utility_meter`'s own `calibrate` service) for manually correcting a wrong inference, and
+        `occupancy_tracker.export_topology`/`import_topology` (response-data and
+        schema-validated-input services respectively) for backup/restore or copying a topology
+        between installs. Import reuses the exact same validate/save/reload logic the websocket
+        save command uses — both now call a single `topology_store.async_replace_topology()`
+        rather than duplicating that logic (the old `websocket_api._topology_validation_errors`
+        was promoted to `topology_store.validate_topology()` in the same move).
+      - **Missing "typical household size" confidence hint (SPEC.md §6.4/§7.2), now built**:
+        `EngineConfig.household_size_hint`, deliberately *not* wired into any count-inference
+        branch (SPEC.md is explicit this must never cap a count) — surfaced purely as a new
+        `exceeds_household_size_hint` attribute on `sensor.total_occupant_count`.
+      - **Tunables that existed in code but had no UI path at all, now exposed via the options
+        flow**: `EngineConfig.transit_confirmation_window`/`confirmed_freshness_window` and
+        `ZoneFusionConfig.pre_arm_window`, as `selector.DurationSelector` fields (verified: it
+        validates but returns the submitted dict as-is, not zero-filled — `__init__.py`'s
+        `_duration_option()` converts via `timedelta(**value)`), plus the household-size hint as a
+        `selector.NumberSelector` with no forced default (unset is a real, distinct state).
+      - **A real, previously-undiscovered bug**: `panel.py`'s `config_panel_domain` (added Phase
+        7b-i) made the options flow completely unreachable from the UI — not just for these new
+        tunables, but for the zone-fusion settings that had been there since Phase 6. Removed; see
+        `docs/DECISIONS.md`'s 2026-08-09 entry for the full verification trail (this needed tracing
+        into the actual frontend source, not assumed).
+      - **A second, more severe discoverability bug found via live testing**: even after the fix
+        above, the project owner still couldn't find "Occupancy Tracker" under Settings → Devices &
+        Services at all — not a gear-icon problem, the integration itself wasn't listed. Root cause:
+        `manifest.json`'s `integration_type: "helper"` (set at Phase 0, never revisited) routes a
+        config entry to a **separate "Helpers" tab**, not the main "Integrations" tab everything in
+        this project's own docs says to look at — verified from the frontend's actual websocket
+        subscription filters (`ha-config-integrations.ts` vs. `ha-config-helpers.ts`), which are
+        mutually exclusive by `integration_type`. Changed to `"hub"` (HA's own default for an
+        unspecified `integration_type`, and a better fit than "helper" for something this
+        multi-entity/panel-driven in the first place) — see `docs/DECISIONS.md`. **This means every
+        session's own instructions to find it under Devices & Services → Integrations were subtly
+        wrong the entire time**, and it's worth double-checking there isn't a third variant of this
+        same class of bug still lurking (anything else keyed off `integration_type`/manifest
+        metadata that was set once at Phase 0 and never re-validated against how the product
+        actually turned out).
+      - **Entity friendly names**: `registry_sync.py`'s `EntitySnapshot` gained a `name` field via
+        `entity_registry.async_get_full_entity_name` (verified: the same display-name resolution
+        HA's own UI uses), so the topology panel's entity checklists show "Kitchen Motion" instead
+        of `binary_sensor.kitchen_motion` — SPEC.md §5.2's own examples ("this motion sensor")
+        implied this, and showing raw entity ids was the single biggest "looks like a dev tool, not
+        a Home Assistant feature" finding from the UX audit.
+      - **Content/metadata**: `README.md`/`CHANGELOG.md` rewritten (both were still literal Phase-0
+        placeholder text describing a nonexistent product); `manifest.json`'s `codeowners`/
+        `documentation`/`issue_tracker` replaced with an obvious `TODO-set-your-github-username`
+        placeholder (previously a stale, unrelated real-looking GitHub handle) — **project owner
+        confirmed they'll set up a real GitHub repo before HACS submission, not now; this is a
+        tracked action item, see "Open follow-up" below**; a stale docstring in
+        `websocket_api.py`'s `_engine_state_json` (claimed "not a push subscription," no longer true
+        since this session's earlier live-refresh fix) corrected.
+      - **Investigated, deliberately not changed**: swapping the topology panel's raw
+        `<input type="checkbox">` checklists for HA's native `ha-checkbox` — traced to the exact
+        installed frontend version (`20260729.6`) and found it now wraps a "Web Awesome" web
+        component whose event/property contract couldn't be verified from available source (a
+        separate package, not in the `frontend` repo). Left as-is per this project's hard rule
+        against proceeding on an unverified API guess — see `docs/DECISIONS.md`.
+      - **Noted, not yet built** (real UX ideas from the audit, not requirements gaps): no
+        setup-friction relief for entity selection (smart pre-checked defaults for likely-relevant
+        entities), no transition when the detail panel opens/closes, color-contrast of the quality
+        chips not spot-checked in both themes. Not blocking — logged for a future polish pass.
+      36 new/updated tests (142 total: engine override/hint tests, options-flow tunable tests,
+      `__init__.py` wiring tests, entity-attribute test, a new `tests/test_services.py`).
+      `ruff`/`mypy` clean. This batch was browser-verified by the project owner, who then raised four
+      more real findings from actually using it — all now fixed, in this same Phase 8 pass:
+      - **Options-flow/service language was too technical**, per direct project-owner feedback ("the
+        language needs to assume the user doesn't have an understanding of the code or technical
+        methods... dumb it down to simple concepts"). `translations/en.json` fully rewritten in plain,
+        cause-and-effect language throughout — see `docs/DECISIONS.md`'s entry for an example.
+      - **No navigation path from Settings → Devices & Services back to the topology panel**, once
+        `config_panel_domain` was removed (the fix above): the gear icon now only opens the options
+        form, with nothing linking back to the panel except the sidebar entry. Fixed by registering a
+        virtual `DeviceEntryType.SERVICE` device per entry with a `homeassistant://occupancy_tracker`
+        `configuration_url` (its "Visit" link opens the panel without a real network request — a real,
+        verified HA capability, see `docs/DECISIONS.md`), with the two house-level entities now
+        grouped under it.
+      - **Per-Area entity clutter**: since every HA Area becomes a topology node with no "opt out,"
+        a house with many rooms produced a same-sized sensor/binary_sensor pair for every single one,
+        regardless of whether the user had configured anything for most of them — flagged directly by
+        the project owner as unnecessary and worth cleaning up. Fixed with a new
+        `topology_store.active_area_ids()` (an Area counts as active once it has at least one
+        activity-evidence entity selected, or is an access point) that `sensor.py`/`binary_sensor.py`
+        now filter per-Area entity creation against, plus a new `__init__.py`
+        `_prune_inactive_area_entities()` that actively removes a previously-registered per-Area
+        entity once its Area drops out of the active set (not just leaves it unavailable). The engine's
+        own internal graph is deliberately untouched by this — it still models every Area, since a
+        sensor-less Area can be a legitimate transit pass-through node (SPEC.md §5.1); only which HA
+        *entities* get created is affected. The topology panel gained a matching `_isAreaActive()`
+        check: an inactive Area's node is now visibly dimmed in the graph, and its detail panel shows
+        an explanatory notice instead of an empty checklist. See `docs/DECISIONS.md` for the full
+        design writeup.
+      - **A full UI/UX pass on the topology panel's main card**, triggered by an annotated screenshot
+        from the project owner: the graph legend was mixed into the top explainer paragraph instead of
+        living with the caption at the bottom (now moved into a new `.graph-footer` block); the
+        caption was center-aligned against an otherwise left-aligned card (fixed); and all card copy —
+        quality/provenance chip labels, section headings, empty/loading/error states, checklist
+        descriptions — rewritten in the same plain language as the options-flow work above.
+      12 new/updated tests since the 142 above (154 total): a device-registration test, three new
+      `test_init.py` tests replacing the old zero-topology assumption (house-level entities always
+      exist; per-Area entities appear once something's selected; a full deselect-then-reload actually
+      removes them from the entity registry, not just from state), two existing `test_entities.py`
+      tests updated to select-then-reload before asserting on a per-Area entity, two
+      `test_services.py` tests updated to use a tracked Area, and four new `test_topology_store.py`
+      tests for `active_area_ids()` itself. `ruff`/`mypy`/full `pytest` all clean; dev instance
+      restarted and confirmed a clean boot (`Home Assistant initialized in 6.99s`, no
+      `occupancy_tracker` errors). **Browser-verified by the project owner ("all ok")**: device →
+      panel navigation, per-Area entity pruning (both directions), the panel's legend/alignment/
+      language pass, and the options-flow plain-language rewrite all confirmed working live.
+      - **A brand icon**: `custom_components/occupancy_tracker/brand/icon.png` (+ `icon@2x.png`) — a
+        simple generated placeholder (house glyph + a small "presence" dot), swappable later. Uses
+        HA 2026.3+'s local-brand-image mechanism (a `brand/` folder inside the integration, no
+        `manifest.json` change), verified from the HA developer blog rather than assumed, since
+        custom integrations can't get into the official `home-assistant/brands` repo the way core
+        integrations can.
+      - **Connector/egress lines redrawn from node edge to node edge**, not center to center (a new
+        `pointTowardsEdge()` helper), and each active Area's node now shows its **live occupant count**
+        as a label inside the circle, sourced from the same engine-state subscription the detail panel
+        already uses. Both from direct project-owner feedback while testing (a connector line was
+        visibly cutting through a room's circle; a count-at-a-glance was requested as lower-friction
+        than opening a room's detail panel). See `docs/DECISIONS.md` for the full design writeup,
+        including why trimming the line was the right fix rather than just patching the one visibly
+        broken case (an inactive node's dimming).
+      - **A real regression, found and fixed the same session**: the occupant-count/line-trim change
+        above shipped with a literal backtick inside a comment inside `static styles = css\`...\``
+        (one giant JS template literal — a backtick anywhere inside it, even in what reads as a "CSS
+        comment," terminates it early). This blanked the entire panel — confirmed from HA's own
+        server-side capture of the browser's console error, not guessed. Fixed, and — significant for
+        future sessions — a **real Node.js install was found reachable from WSL** at
+        `/mnt/c/Program Files/nodejs/node.exe` (previously believed unavailable; see
+        `docs/DECISIONS.md`), so `node --check <file>` can now actually verify frontend JS syntax
+        before it ships, instead of relying on manual re-reading alone.
+      - **Two extra real per-room test fixtures** added to the dev instance for exercising access-point
+        and near-house-zone flows: `input_boolean.kitchen_door` and
+        `input_boolean.entrance_hallway_door`, assigned to their Areas the same way the existing
+        motion/light fixtures are.
+      - **The synthetic "Outside" graph node and its converging dashed edges were removed entirely**,
+        per project-owner feedback (with screenshots) that a house with more than one or two access
+        points produced messy crossing lines to one arbitrarily-positioned shared node, and it didn't
+        add anything the existing per-node dashed ring didn't already convey. Access points are now
+        communicated purely by that ring; the engine's own internal `OUTSIDE` transit-inference
+        concept is unaffected (it was always derived independently from `egress_points`, never from
+        this UI node). See `docs/DECISIONS.md` for the full reasoning and what was and wasn't touched
+        on the backend (nothing — the save schema's `outside_position` field already accepted `null`).
 
 ## Open questions blocking specific phases
 
@@ -392,6 +637,26 @@ test venv:
   `libturbojpeg`) still fail to fully initialize in this dev instance and log errors on every boot —
   confirmed harmless and unrelated to Occupancy Tracker (traced each one), left as-is rather than
   chased further.
+- **⚠️ Boot sometimes hangs silently, and default log verbosity gives zero visibility into it —
+  always start with `-v` and confirm `Home Assistant initialized in Xs` before assuming anything is
+  broken.** Discovered this session (cost significant time — recorded here so it isn't re-chased from
+  scratch): at default log verbosity, `hass --config ...` produces almost no "Setting up X" lines at
+  all (those are DEBUG-level, not INFO), so long stretches of log silence are *normal* and are not
+  evidence of a hang either way. Separately, the process has genuinely hung silently and
+  reproducibly partway through boot multiple times this session (always with plenty of free
+  memory/disk, a working DNS/network, and a *correct* monotonic clock — all checked and ruled out),
+  then booted cleanly in ~6s on the very next attempt with no code or environment change in between —
+  so treat it as a known-intermittent WSL2/dev-instance flake, not a code regression, unless it
+  reproduces after a real code change and disappears when that change is reverted. A `py-spy dump`
+  of a genuinely hung process is **not useful** for distinguishing "hung" from "healthy and idle" —
+  both show every thread parked in a normal idle wait (`select()` on the main thread, executor
+  threads blocked on their work queue) with zero CPU, because a suspended asyncio Task waiting on a
+  Future that will never resolve occupies no OS thread and so is invisible to a native stack dump
+  either way. The one reliable signal is the log line `homeassistant.bootstrap: Home Assistant
+  initialized in Xs` (only printed at INFO level, so `-v` isn't strictly required for *this* one
+  line, but is needed for everything else that would help triage a real hang) — if that line never
+  appears after a couple of minutes, kill (`pkill -f 'bin/hass'`) and just retry before assuming
+  something is actually broken.
 
 ## Known tooling caveat (not a CI issue)
 
@@ -430,24 +695,50 @@ Near-house zone matching only works for trackers that populate the modern `in_zo
 trackers don't). Documented in DECISIONS.md rather than worked around, since the primary spec'd use
 case (companion app) is unaffected.
 
+## Resolved follow-up — per-area entity-selection UI (was: discovered 2026-08-09, fixed 2026-08-09)
+
+**Previously:** no UI existed to pick which entities count as activity evidence for a room
+(`SPEC.md` §5.2). `area_entity_selections` was fully wired end-to-end on the backend since Phase 4,
+but nothing in the panel let a user populate it, so a real house had zero real signal anywhere.
+**Now fixed** by Phase 7b-v above — see that entry for what shipped. Leaving this note rather than
+deleting it outright, since it explains why Phase 7 briefly showed as "done but not really usable"
+in two consecutive sessions' status text.
+
+## Open follow-up (action item, not blocking further phase work) — added 2026-08-09
+
+**`manifest.json`'s `codeowners`/`documentation`/`issue_tracker` are an obvious
+`TODO-set-your-github-username` placeholder**, replacing a previous *real-looking* but wrong GitHub
+handle (`@yme207`) found during the Phase 8 requirements audit. Project owner explicitly chose to
+set up a real GitHub repo later rather than provide details now — **must be fixed before any HACS
+submission** (this will also need updating in `README.md`'s clone instructions once a real repo
+exists). Revisit alongside `SPEC.md` §13 Q3 (HACS submission bar).
+
 ## Next action
 
-**Phase 7b-ii — editable connectors** (`SPEC.md` §7.3): let the user draw/remove Connector edges
-between Area nodes in the graph, calling `occupancy_tracker/topology/save` (schema/backend already
-supports it — Phase 7a's `_topology_validation_errors` already rejects a connector to unknown areas,
-a self-loop, or a duplicate `connector_id`). Open design question to resolve first: what the actual
-draw interaction is — drag from one node to another, or click two nodes in sequence — worth a quick
-look at prior art (other HA/HACS graph-style editors) rather than just picking one. Optimistic UI
-updates per `docs/UX_GUIDELINES.md` §2, matching how node dragging already behaves. After that,
-Phase 7b-iii (egress-point flagging) is the same shape of work again, then Phase 7b-iv
-(explainability inspector, which needs a new engine-state-reading websocket command that doesn't
-exist yet).
+Both Phase 8 batches (requirements/UX audit fixes, then the live-testing-driven navigation/clutter/
+language fixes) are now built, tested, and browser-verified end to end. Remaining before Phase 8 can
+be considered done:
 
-The Phase 7b-i browser-verification loop this session (project owner testing → real bug found → fix
-→ retest) worked well and is worth repeating for 7b-ii rather than shipping connector-drawing
-untested — see "Local dev Home Assistant instance" above for the instance to reuse (check whether
-it's still running first: `ps aux | grep '[b]in/hass'` in WSL; restart per the instructions there if
-not, and **always restart after pulling in Python changes**, which bit us once already this session).
+1. The still-open `docs/UX_GUIDELINES.md` review items noted earlier (light/dark theme spot-checks on
+   the quality chips, the noted-but-not-built UX ideas: setup-friction relief for entity selection,
+   a detail-panel open/close transition).
+2. `SPEC.md` §13 Q3's HACS submission bar decision (custom-repository-first vs. pursuing the HACS
+   default-repository listing).
+3. The `manifest.json` `codeowners`/`documentation`/`issue_tracker` placeholder (see "Open follow-up"
+   above) — blocked on the project owner setting up a real GitHub repo, not forgotten.
+4. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
+   fixtures — never tried yet, worth doing before calling Phase 8 done.
+
+The browser-verification loop this session (project owner testing → real bug found → fix → retest)
+worked well through six slices in a row now and is worth continuing — see "Local dev Home Assistant
+instance" above for the instance to reuse, **and read its boot-hang note before assuming a stuck
+instance means broken code** (this cost real time earlier in the session before being understood as
+an intermittent environment flake, not a regression). Check whether it's still running first:
+`ps aux | grep '[b]in/hass'` in WSL; restart per the instructions there if not (note: `pkill -f
+'bin/hass'` can match its own invocation and appear to fail with a nonzero exit even though it
+successfully killed the target — always verify with a follow-up `ps` check, don't trust the exit
+code alone), and **always restart after pulling in Python changes** (pure JS/frontend changes under
+`www/` need no restart, per the same section).
 
 No HA-python test harness applies to frontend JS; verification is manual in-browser per
 `CLAUDE.md`'s UI rule.

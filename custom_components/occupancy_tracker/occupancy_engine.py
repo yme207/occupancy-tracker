@@ -160,6 +160,15 @@ class EngineConfig:
     #: person: a gap shorter than this is physically impossible (they can't
     #: teleport), so it's read as a second, independent occupant instead.
     min_transit_time: timedelta = timedelta(seconds=2)
+    #: Optional whole-house "typical household size" confidence hint (SPEC.md
+    #: §6.4) — deliberately *not* consulted anywhere in the count-inference
+    #: logic above (`_handle_area_activity` et al.): SPEC.md is explicit this
+    #: "must never reject or cap a count the evidence actually supports," so
+    #: it's surfaced only as a separate, purely observational attribute
+    #: (`exceeds_household_size_hint`, `sensor.py`'s `TotalOccupantCountSensor`)
+    #: rather than woven into the state machine, where it would risk becoming
+    #: a de facto cap through some later refactor.
+    household_size_hint: int | None = None
 
 
 @dataclass(slots=True)
@@ -181,6 +190,21 @@ class OccupancyEngine:
         self._last_provenance: dict[str, ProvenanceTier | None] = dict.fromkeys(graph.area_ids)
         self._pending: dict[str, _PendingTransit] = {}
         self._listeners: list[Callable[[], None]] = []
+
+    @property
+    def graph(self) -> HouseGraph:
+        """The `HouseGraph` this engine was built from — read-only, for callers that need to
+        resolve a Connector id (e.g. from `pending_transit_connector_ids`) back to the Areas it
+        connects (SPEC.md §7.3's explainability inspector) without duplicating graph-construction
+        logic outside `engine_adapter.py`. `HouseGraph` is itself a frozen dataclass, so this
+        can't be used to mutate engine state through the back door.
+        """
+        return self._graph
+
+    @property
+    def household_size_hint(self) -> int | None:
+        """The configured "typical household size" confidence hint (SPEC.md §6.4), if any."""
+        return self._config.household_size_hint
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Register a callback invoked after any Signal changes belief state.
@@ -225,6 +249,32 @@ class OccupancyEngine:
         """Connector ids with an unresolved transit, for diagnostics (SPEC.md §8)."""
         self._expire_pending(now)
         return frozenset(self._pending)
+
+    def override_occupant_count(self, area_id: str, count: int, now: datetime) -> None:
+        """Directly set an Area's occupant count (SPEC.md §8's manual override service).
+
+        Bypasses the latch/transit machinery entirely — this is for the rare case a person
+        corrects a wrong automatic inference on the spot, not a new kind of `Signal` the engine
+        reasons about. Clears any pending transit touching this Area, since a manual correction is
+        strictly more authoritative than an unresolved automatic guess about the same Area, and
+        leaving it in place could otherwise later resolve the count elsewhere out from under it.
+        """
+        if area_id not in self._counts:
+            raise ValueError(f"Unknown area: {area_id!r}")
+        if count < 0:
+            raise ValueError(f"Occupant count cannot be negative: {count!r}")
+        self._expire_pending(now)
+        for connector_id in [
+            connector_id
+            for connector_id, pending in self._pending.items()
+            if pending.source_area_id == area_id or pending.dest_area_id == area_id
+        ]:
+            del self._pending[connector_id]
+        self._counts[area_id] = count
+        self._last_confirmed[area_id] = now
+        self._last_provenance[area_id] = ProvenanceTier.USER_CONFIRMED
+        for listener in list(self._listeners):
+            listener()
 
     def process_signal(self, signal: Signal) -> None:
         """Fold one normalized Signal into the engine's belief state."""

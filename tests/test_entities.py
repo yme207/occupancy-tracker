@@ -10,6 +10,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.occupancy_tracker.const import CONF_HOUSEHOLD_SIZE_HINT
 from custom_components.occupancy_tracker.topology_store import TopologyData
 
 
@@ -32,14 +33,17 @@ async def test_area_activity_updates_entities_end_to_end(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    # The topology's per-area entity selection was empty at setup, so no
-    # signal will flow yet -- select the entity now and restart signal
-    # ingestion to pick it up (mirrors what the Phase 7 topology editor will
-    # eventually trigger).
-    runtime_data = entry.runtime_data
-    topology = TopologyData(area_entity_selections={kitchen.id: (motion_entry.entity_id,)})
-    await runtime_data.topology_store.async_save(topology)
-    runtime_data.signal_ingestion.async_start(topology)
+    # The topology's per-area entity selection was empty at setup, so Kitchen
+    # isn't tracked yet (no entities at all — project-owner feedback that an
+    # untouched Area shouldn't get sensors) and no signal flows either.
+    # Selecting the entity and reloading (mirrors what the topology editor
+    # actually triggers) is what both creates the entities and picks up the
+    # new signal-ingestion subscription in one step.
+    await entry.runtime_data.topology_store.async_save(
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry.entity_id,)})
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
 
     assert hass.states.get("sensor.kitchen_occupant_count") is not None
 
@@ -58,3 +62,61 @@ async def test_area_activity_updates_entities_end_to_end(
     assert occupied_state.attributes["provenance"] == "ambiguous_physical"
     assert total_state is not None
     assert total_state.state == "1"
+
+
+async def test_total_occupant_count_flags_when_exceeding_household_size_hint(
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    entity_registry: er.EntityRegistry,
+    enable_custom_integrations: None,
+) -> None:
+    """SPEC.md §6.4's household-size hint must never cap the count, but
+    should surface as a confidence-only, inspectable attribute (§6.8) once
+    the real count exceeds it.
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    study = area_registry.async_get_or_create("Study")  # not connected to kitchen
+    kitchen_motion = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "kitchen-motion", suggested_object_id="kitchen_motion"
+    )
+    study_motion = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "study-motion", suggested_object_id="study_motion"
+    )
+    entity_registry.async_update_entity(kitchen_motion.entity_id, area_id=kitchen.id)
+    entity_registry.async_update_entity(study_motion.entity_id, area_id=study.id)
+    hass.states.async_set(kitchen_motion.entity_id, "off")
+    hass.states.async_set(study_motion.entity_id, "off")
+    await hass.async_block_till_done()
+
+    entry = MockConfigEntry(domain="occupancy_tracker", options={CONF_HOUSEHOLD_SIZE_HINT: 1})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await entry.runtime_data.topology_store.async_save(
+        TopologyData(
+            area_entity_selections={
+                kitchen.id: (kitchen_motion.entity_id,),
+                study.id: (study_motion.entity_id,),
+            }
+        )
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    hass.states.async_set(kitchen_motion.entity_id, "on")
+    await hass.async_block_till_done()
+    total_state = hass.states.get("sensor.total_occupant_count")
+    assert total_state is not None
+    assert total_state.state == "1"
+    assert total_state.attributes["exceeds_household_size_hint"] is False
+
+    # Two disconnected, simultaneously-active Areas is unexplainable as one
+    # person moving between them (SPEC.md §6.4) — a second, independent
+    # occupant, taking the total past the hint of 1.
+    hass.states.async_set(study_motion.entity_id, "on")
+    await hass.async_block_till_done()
+    total_state = hass.states.get("sensor.total_occupant_count")
+    assert total_state is not None
+    assert total_state.state == "2"
+    assert total_state.attributes["exceeds_household_size_hint"] is True

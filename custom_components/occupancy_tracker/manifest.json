@@ -1,12 +1,12 @@
 {
   "domain": "occupancy_tracker",
   "name": "Occupancy Tracker",
-  "codeowners": ["@yme207"],
+  "codeowners": ["@TODO-set-your-github-username"],
   "config_flow": true,
   "dependencies": ["http", "panel_custom", "websocket_api"],
-  "documentation": "https://github.com/yme207/occupancy-tracker",
-  "issue_tracker": "https://github.com/yme207/occupancy-tracker/issues",
-  "integration_type": "helper",
+  "documentation": "https://github.com/TODO-set-your-github-username/occupancy-tracker",
+  "issue_tracker": "https://github.com/TODO-set-your-github-username/occupancy-tracker/issues",
+  "integration_type": "hub",
   "iot_class": "calculated",
   "single_config_entry": true,
   "version": "0.1.0"

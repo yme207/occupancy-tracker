@@ -82,11 +82,9 @@ class ZoneCorroboration(Enum):
 @dataclass(frozen=True, slots=True)
 class ZoneFusionConfig:
     """Tunables for zone fusion (docs/ARCHITECTURE.md §2's typed-config
-    extension point). `SPEC.md` §7.2 lists this as an options-flow candidate
-    ("transit confirmation/grace windows") — not yet exposed there; the
-    entity/zone *selection* fields are (see config_flow.py), but this
-    specific window is a sensible fixed default for now rather than
-    speculative UI surface with no evidence a fixed default is wrong.
+    extension point). Exposed via the options flow as `CONF_PRE_ARM_WINDOW`
+    (see config_flow.py) — `__init__.py` builds this dataclass from
+    `entry.options`, falling back to the default below when unset.
     """
 
     #: How long after entering a near-house zone a tracked person keeps the

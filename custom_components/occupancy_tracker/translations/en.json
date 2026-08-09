@@ -3,18 +3,56 @@
     "step": {
       "user": {
         "title": "Set up Occupancy Tracker",
-        "description": "Occupancy Tracker reads your rooms, devices, and entities directly from Home Assistant — there's nothing to configure here yet. Select Submit to add it, then use Configure afterwards to draw your room topology and set egress points."
+        "description": "Occupancy Tracker reads your rooms, devices, and sensors directly from Home Assistant — there's nothing to set up here yet. Select Submit to add it, then look for it in your sidebar to map out your rooms and choose which sensors to use."
       }
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Zone presence settings",
-        "description": "Optional: fuse companion-app/device-tracker zone presence with occupancy detection. Zone presence alone never changes a room's occupant count — it only corroborates confidence and can pre-arm automations ahead of confirmed arrival.",
+        "title": "Occupancy Tracker settings",
+        "description": "Fine-tune how Occupancy Tracker behaves. Everything here is optional — it works with sensible defaults out of the box.",
         "data": {
-          "tracked_persons": "People/device trackers to fuse",
-          "near_house_zones": "Zones that count as \"near the house\" for pre-arming"
+          "tracked_persons": "People to help confirm who's home",
+          "near_house_zones": "Zones that mean \"nearby, but not home yet\"",
+          "household_size_hint": "How many people usually live here (optional)",
+          "transit_confirmation_window": "How long to wait before deciding someone didn't move rooms",
+          "confirmed_freshness_window": "How long a room stays shown as \"just confirmed\"",
+          "pre_arm_window": "How long the house stays \"ready\" after someone gets close"
+        },
+        "data_description": {
+          "tracked_persons": "Pick the phone or person trackers you'd like Occupancy Tracker to pay attention to. On their own, these can never place someone in a specific room — that always comes from your actual door/motion sensors. This just adds extra confidence when someone's phone agrees they're home.",
+          "near_house_zones": "Pick any map zones — like a driveway or front yard — that mean someone is approaching the house but hasn't come inside yet. This is only used to get things \"ready\" a little early (see the setting below); it never counts as someone being home.",
+          "household_size_hint": "Just a rough guide — leave it blank if you're not sure. It never limits how many people can actually be counted; it only makes an unusually high, unexplained number look less certain, since that would be unusual for a household this size.",
+          "transit_confirmation_window": "When it looks like someone might be walking from one room to the next, this is how long it gives the next room to prove that guess right before giving up. Turn this up if people in your home often take a while getting between rooms; turn it down if you want quicker (but occasionally wrong) answers.",
+          "confirmed_freshness_window": "After a room is confirmed occupied, it's shown as freshly \"confirmed\" for this long, then quietly switches to \"probably still occupied\" if nothing new has happened. This only changes how confident the room looks on your dashboard — it never changes whether the room is actually counted as occupied.",
+          "pre_arm_window": "Once someone enters a nearby zone (see above), the house stays \"ready\" for this long — useful if you have automations, like turning on lights, that you want to trigger a little faster right when someone actually walks in."
+        }
+      }
+    }
+  },
+  "services": {
+    "set_occupant_count": {
+      "name": "Set occupant count",
+      "description": "Manually correct a room's occupant count if Occupancy Tracker got it wrong.",
+      "fields": {
+        "count": {
+          "name": "Count",
+          "description": "How many people should be counted in this room."
+        }
+      }
+    },
+    "export_topology": {
+      "name": "Export room layout",
+      "description": "Save your current rooms, connections, access points, and sensor choices as data — useful for keeping a backup or copying your setup to another Home Assistant installation."
+    },
+    "import_topology": {
+      "name": "Import room layout",
+      "description": "Restore a previously exported room layout. If anything in it doesn't match your current rooms or sensors, nothing is changed at all — fix the mismatch and try again.",
+      "fields": {
+        "topology": {
+          "name": "Room layout",
+          "description": "The room layout data, exactly as returned by \"Export room layout\"."
         }
       }
     }

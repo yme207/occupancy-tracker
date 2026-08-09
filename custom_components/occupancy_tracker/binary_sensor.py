@@ -6,11 +6,14 @@ from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from . import OccupancyTrackerConfigEntry
+from .const import DOMAIN
 from .occupancy_engine import OccupancyEngine
+from .topology_store import active_area_ids
 from .zone_fusion import ZoneFusion
 
 
@@ -22,10 +25,12 @@ async def async_setup_entry(
     """Set up binary sensors for this config entry."""
     runtime_data = entry.runtime_data
     house_shape = runtime_data.registry_sync.house_shape
+    active = active_area_ids(runtime_data.topology_store.topology)
 
     entities: list[BinarySensorEntity] = [
         AreaOccupiedBinarySensor(entry.entry_id, runtime_data.engine, area.area_id, area.name)
         for area in house_shape.areas.values()
+        if area.area_id in active
     ]
     entities.append(PreArmedBinarySensor(entry.entry_id, runtime_data.zone_fusion))
     async_add_entities(entities)
@@ -80,6 +85,10 @@ class PreArmedBinarySensor(BinarySensorEntity):
         self._zone_fusion = zone_fusion
         self._attr_unique_id = f"{entry_id}_pre_armed"
         self._attr_name = "Pre-Armed"
+        # Groups the house-level entities under the single virtual device
+        # __init__.py registers (its `configuration_url` is what gives the
+        # integration's own Settings page a link back to the topology panel).
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)})
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(self._zone_fusion.add_listener(self._handle_zone_update))

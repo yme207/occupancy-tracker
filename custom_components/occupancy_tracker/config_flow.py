@@ -23,7 +23,15 @@ from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResu
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import CONF_NEAR_HOUSE_ZONES, CONF_TRACKED_PERSONS, DOMAIN
+from .const import (
+    CONF_CONFIRMED_FRESHNESS_WINDOW,
+    CONF_HOUSEHOLD_SIZE_HINT,
+    CONF_NEAR_HOUSE_ZONES,
+    CONF_PRE_ARM_WINDOW,
+    CONF_TRACKED_PERSONS,
+    CONF_TRANSIT_CONFIRMATION_WINDOW,
+    DOMAIN,
+)
 
 
 class OccupancyTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -47,7 +55,11 @@ class OccupancyTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class OccupancyTrackerOptionsFlow(OptionsFlow):
-    """Zone-presence-fusion settings (SPEC.md §6.7, §7.2)."""
+    """Zone-presence-fusion settings (SPEC.md §6.7, §7.2) plus the engine's
+    tunable confidence/timing windows (SPEC.md §6.4, §7.2) — all the scalar
+    settings SPEC.md §7.2 calls for as "standard HA options-flow forms," as
+    opposed to the topology itself, which needs the graphical panel (§7.3).
+    """
 
     # No @override: async_step_init is dispatched dynamically by step_id
     # convention (options flows start at "init"), not inherited from a base
@@ -73,6 +85,28 @@ class OccupancyTrackerOptionsFlow(OptionsFlow):
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="zone", multiple=True)
                 ),
+                # Optional whole-house confidence hint (SPEC.md §6.4) — no
+                # default value at all (as opposed to a numeric default like
+                # 0) so "unset" is a real, distinct state, not
+                # indistinguishable from "hint of 0 people."
+                vol.Optional(
+                    CONF_HOUSEHOLD_SIZE_HINT,
+                    description={"suggested_value": options.get(CONF_HOUSEHOLD_SIZE_HINT)},
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_TRANSIT_CONFIRMATION_WINDOW,
+                    default=options.get(CONF_TRANSIT_CONFIRMATION_WINDOW, {"seconds": 90}),
+                ): selector.DurationSelector(),
+                vol.Optional(
+                    CONF_CONFIRMED_FRESHNESS_WINDOW,
+                    default=options.get(CONF_CONFIRMED_FRESHNESS_WINDOW, {"minutes": 10}),
+                ): selector.DurationSelector(),
+                vol.Optional(
+                    CONF_PRE_ARM_WINDOW,
+                    default=options.get(CONF_PRE_ARM_WINDOW, {"minutes": 5}),
+                ): selector.DurationSelector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

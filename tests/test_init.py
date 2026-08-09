@@ -9,13 +9,23 @@ only that flow discovers.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.occupancy_tracker import OccupancyTrackerRuntimeData
-from custom_components.occupancy_tracker.const import CONF_TRACKED_PERSONS
+from custom_components.occupancy_tracker.const import (
+    CONF_CONFIRMED_FRESHNESS_WINDOW,
+    CONF_HOUSEHOLD_SIZE_HINT,
+    CONF_PRE_ARM_WINDOW,
+    CONF_TRACKED_PERSONS,
+    CONF_TRANSIT_CONFIRMATION_WINDOW,
+)
 from custom_components.occupancy_tracker.topology_store import Connector, TopologyData
 
 
@@ -32,9 +42,32 @@ async def test_setup_entry_wires_up_runtime_data(
     assert isinstance(entry.runtime_data, OccupancyTrackerRuntimeData)
 
 
-async def test_setup_entry_creates_entities_for_each_area(
+async def test_setup_entry_registers_a_device_linking_back_to_the_panel(
+    hass: HomeAssistant, device_registry: dr.DeviceRegistry, enable_custom_integrations: None
+) -> None:
+    """With the options flow back on the gear icon (see the config_panel_domain
+    fix), the only other navigation path from Settings -> Devices & Services
+    back to the topology panel is a device's "Visit" link — verify it's
+    actually registered and points at the panel, not just that setup succeeds.
+    """
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    device = device_registry.async_get_device(identifiers={("occupancy_tracker", entry.entry_id)})
+    assert device is not None
+    assert device.configuration_url == "homeassistant://occupancy_tracker"
+
+
+async def test_setup_entry_creates_house_level_entities_regardless(
     hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
 ) -> None:
+    """The house-level entities always exist, even with zero configured areas —
+    only *per-Area* entities depend on that Area actually being tracked
+    (see test_setup_entry_skips_entities_for_untracked_areas below).
+    """
     area_registry.async_get_or_create("Kitchen")
     entry = MockConfigEntry(domain="occupancy_tracker")
     entry.add_to_hass(hass)
@@ -42,10 +75,78 @@ async def test_setup_entry_creates_entities_for_each_area(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert hass.states.get("sensor.kitchen_occupant_count") is not None
-    assert hass.states.get("binary_sensor.kitchen_occupied") is not None
     assert hass.states.get("sensor.total_occupant_count") is not None
     assert hass.states.get("binary_sensor.pre_armed") is not None
+
+
+async def test_setup_entry_skips_entities_for_untracked_areas(
+    hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
+) -> None:
+    """A room with nothing selected (no activity evidence, not an access
+    point) is one the user hasn't opted into tracking — project-owner
+    feedback that a permanently-zero sensor for it is clutter, not a useful
+    default. Once it does have something selected, its entities appear (and
+    a later full deselect removes them again — see test_topology_store.py's
+    own `active_area_ids` tests plus the pruning test below).
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.kitchen_occupant_count") is None
+    assert hass.states.get("binary_sensor.kitchen_occupied") is None
+
+    motion_entry_id = "binary_sensor.kitchen_motion"
+    hass.states.async_set(motion_entry_id, "off")
+    await entry.runtime_data.topology_store.async_save(
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry_id,)})
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.kitchen_occupant_count") is not None
+    assert hass.states.get("binary_sensor.kitchen_occupied") is not None
+
+
+async def test_reload_removes_entities_for_areas_deselected_entirely(
+    hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
+) -> None:
+    """Deselecting a room's last piece of evidence should remove its
+    now-stale entities, not leave them registered-but-unavailable forever.
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    motion_entry_id = "binary_sensor.kitchen_motion"
+    hass.states.async_set(motion_entry_id, "off")
+    await entry.runtime_data.topology_store.async_save(
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry_id,)})
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_occupant_count") is not None
+
+    await entry.runtime_data.topology_store.async_save(TopologyData())
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.kitchen_occupant_count") is None
+    assert hass.states.get("binary_sensor.kitchen_occupied") is None
+    # Not just absent from states — actually gone from the entity registry,
+    # not merely unavailable (that's the whole point of pruning, not just
+    # skipping re-creation).
+    entity_registry = er.async_get(hass)
+    assert (
+        entity_registry.async_get_entity_id(
+            "sensor", "occupancy_tracker", f"{entry.entry_id}_{kitchen.id}_occupant_count"
+        )
+        is None
+    )
 
 
 async def test_setup_entry_registry_sync_reacts_to_live_changes(
@@ -123,3 +224,47 @@ async def test_options_change_reloads_entry_and_zone_fusion_picks_it_up(
     await hass.async_block_till_done()
 
     assert entry.runtime_data.zone_fusion.house_zone_corroboration().name == "CORROBORATED"
+
+
+async def test_setup_entry_reads_tunables_from_options(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    """SPEC.md §7.2's engine/zone-fusion tunables must actually reach the
+    objects built at setup, not just round-trip through the options flow's
+    own storage (see test_config_flow.py for that half).
+    """
+    entry = MockConfigEntry(
+        domain="occupancy_tracker",
+        options={
+            CONF_HOUSEHOLD_SIZE_HINT: 3,
+            CONF_TRANSIT_CONFIRMATION_WINDOW: {"minutes": 5},
+            CONF_CONFIRMED_FRESHNESS_WINDOW: {"hours": 1},
+            CONF_PRE_ARM_WINDOW: {"minutes": 20},
+        },
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    engine = entry.runtime_data.engine
+    assert engine.household_size_hint == 3
+    assert engine._config.transit_confirmation_window == timedelta(minutes=5)
+    assert engine._config.confirmed_freshness_window == timedelta(hours=1)
+    assert entry.runtime_data.zone_fusion._config.pre_arm_window == timedelta(minutes=20)
+
+
+async def test_setup_entry_defaults_tunables_when_options_unset(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    engine = entry.runtime_data.engine
+    assert engine.household_size_hint is None
+    assert engine._config.transit_confirmation_window == timedelta(seconds=90)
+    assert engine._config.confirmed_freshness_window == timedelta(minutes=10)
+    assert entry.runtime_data.zone_fusion._config.pre_arm_window == timedelta(minutes=5)

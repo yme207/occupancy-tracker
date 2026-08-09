@@ -1,0 +1,22 @@
+set_occupant_count:
+  target:
+    entity:
+      domain: sensor
+      integration: occupancy_tracker
+  fields:
+    count:
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 0
+          mode: box
+
+export_topology:
+
+import_topology:
+  fields:
+    topology:
+      required: true
+      selector:
+        object:

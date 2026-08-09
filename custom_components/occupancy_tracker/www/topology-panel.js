@@ -7,20 +7,64 @@
 // registration, which would go stale if the entry were ever removed and
 // re-added — see docs/DECISIONS.md).
 //
-// Connector-drawing and egress-point flagging aren't built yet (still
-// read-only for those) — this slice is: live-loaded areas, pan/zoom,
-// draggable + grid-snapped + persisted node layout, and a floor-aware
-// auto-arrange, so the graph is actually usable to look at and organize
-// before editing lands on top of it.
+// Connectors are drawn/removed via a "Draw connector" toolbar mode
+// (click one room, then another — not drag, see docs/DECISIONS.md's
+// 2026-08-09 connector-interaction entry) rather than dragging a node onto
+// another, since node-drag already means "reposition" here; a click
+// sequence keeps the two gestures unambiguous and stays keyboard/touch
+// friendly per docs/UX_GUIDELINES.md §6. Egress-point flagging and per-area
+// entity selection (SPEC.md §5.2) are both per-area concerns instead, so
+// they live in the click-to-inspect detail panel as two independent
+// checklists over the same area.entity_ids list: an Area *is* an egress
+// point exactly when its crossing-entity list is non-empty (matches the
+// backend's own validation, so there's no separate on/off flag to keep in
+// sync), while entity selection has no such derived meaning — it's just
+// "which of this room's entities count as occupancy evidence at all."
 import { LitElement, html, svg, css, nothing } from "./vendor/lit-core.min.js";
 
 const NODE_RADIUS = 22;
-const OUTSIDE_ID = "__outside__";
 const GRID_SIZE = 40;
 const MIN_VIEWBOX_W = 240;
 const MAX_VIEWBOX_W = 4000;
 const AUTO_LAYOUT_CELL = 140;
 const AUTO_LAYOUT_BAND_GAP = 70;
+
+// Mirrors occupancy_engine.py's StateQuality/ProvenanceTier enum member
+// names (the websocket API serializes them via `.name`, see
+// websocket_api.py's _engine_state_json) — plain-language labels for the
+// explainability inspector (SPEC.md §7.3).
+const QUALITY_LABELS = {
+  CONFIRMED: "Confirmed",
+  LATCHED: "Probably occupied",
+  AMBIGUOUS: "Checking…",
+};
+const PROVENANCE_LABELS = {
+  USER_CONFIRMED: "someone directly using a device",
+  AMBIGUOUS_PHYSICAL: "a sensor picking up activity",
+};
+
+// crypto.randomUUID() requires a secure context (https or localhost) and is
+// unavailable on a plain-http LAN address — exactly how this project's own
+// dev HA instance is reached (docs/STATUS.md), and a common way real HA
+// installs are reached too. Avoid it rather than assume it.
+function generateConnectorId() {
+  return `connector-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Connector/egress lines are conceptually drawn "from node to node," but a
+// line whose endpoints are the node *centers* runs straight across each
+// circle's interior — visible through it unless the circle sits perfectly
+// opaque and on top in z-order (which an inactive/dimmed node's reduced
+// opacity, or a translucent theme --card-background-color, can't guarantee).
+// Trimming each endpoint back to the circle's edge fixes this unconditionally,
+// regardless of fill opacity or paint order, and is also the visually correct
+// way to draw a node-link diagram in the first place.
+function pointTowardsEdge(from, to, radius) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  return { x: from.x + (dx / dist) * radius, y: from.y + (dy / dist) * radius };
+}
 // Must match .graph-wrap's CSS `aspect-ratio` below exactly. The viewBox is
 // kept at this same ratio at all times (computeViewBox, wheel-zoom) so the
 // SVG never letterboxes (preserveAspectRatio="xMidYMid meet" by default) —
@@ -42,6 +86,11 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     _viewBox: { state: true },
     _gridEnabled: { state: true },
     _panning: { state: true },
+    _connectMode: { state: true },
+    _connectSourceAreaId: { state: true },
+    _connectPreviewPoint: { state: true },
+    _selectedConnectorId: { state: true },
+    _engineState: { state: true },
   };
 
   constructor() {
@@ -57,6 +106,41 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     this._viewBox = { x: 0, y: 0, w: 640, h: 460 };
     this._gridEnabled = true;
     this._panning = false;
+    this._connectMode = false;
+    this._connectSourceAreaId = null;
+    this._connectPreviewPoint = null;
+    this._selectedConnectorId = null;
+    // Live occupancy belief for every Area (SPEC.md §7.3's explainability
+    // inspector) — fetched once on load, then kept fresh for the panel's
+    // whole lifetime via a push subscription (not per-room-selection; see
+    // _subscribeEngineState's own comment for why one subscription covers
+    // every room). Not a reactive Lit property — nothing renders it
+    // directly, it's just a handle for cleanup.
+    this._engineState = null;
+    this._engineStateUnsub = null;
+    this._onKeyDown = this._onKeyDown.bind(this);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener("keydown", this._onKeyDown);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("keydown", this._onKeyDown);
+    this._engineStateUnsub?.();
+    this._engineStateUnsub = null;
+    super.disconnectedCallback();
+  }
+
+  _onKeyDown(e) {
+    if (e.key !== "Escape" || !this._connectMode) return;
+    if (this._connectSourceAreaId) {
+      this._connectSourceAreaId = null;
+      this._connectPreviewPoint = null;
+    } else {
+      this._connectMode = false;
+    }
   }
 
   updated() {
@@ -92,6 +176,8 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       this._houseShape = result.house_shape;
       this._topology = result.topology;
       this._initPositions();
+      await this._loadEngineState();
+      this._subscribeEngineState();
     } catch (err) {
       this._error = err.message || "unknown_error";
     } finally {
@@ -156,11 +242,25 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       });
       y += rows * AUTO_LAYOUT_CELL + AUTO_LAYOUT_BAND_GAP;
     }
+    // AUTO_LAYOUT_CELL (140) isn't a multiple of GRID_SIZE (40), so an
+    // auto-arranged layout would otherwise never actually sit on the same
+    // points a manual grid-snapped drag lands on — snap here too so the two
+    // ways of positioning a node agree with each other and with the visible
+    // dot grid.
+    if (this._gridEnabled) {
+      for (const [areaId, position] of positions) {
+        positions.set(areaId, {
+          x: Math.round(position.x / GRID_SIZE) * GRID_SIZE,
+          y: Math.round(position.y / GRID_SIZE) * GRID_SIZE,
+        });
+      }
+    }
     return positions;
   }
 
   _autoArrangeAll() {
-    this._positions = this._autoLayout(this._areaEntries());
+    const positions = this._autoLayout(this._areaEntries());
+    this._positions = positions;
     this._viewBox = this._computeViewBox([...this._positions.values()]);
     this._saveTopology();
   }
@@ -202,6 +302,120 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     this._gridEnabled = !this._gridEnabled;
   }
 
+  // -- Connector drawing --------------------------------------------------
+
+  _toggleConnectMode() {
+    this._connectMode = !this._connectMode;
+    this._connectSourceAreaId = null;
+    this._connectPreviewPoint = null;
+    this._selectedConnectorId = null;
+  }
+
+  _onNodeConnectClick(areaId) {
+    if (!this._connectSourceAreaId) {
+      this._connectSourceAreaId = areaId;
+      return;
+    }
+    if (this._connectSourceAreaId === areaId) {
+      // Clicking the pending source again cancels it, rather than drawing a
+      // self-loop (the backend rejects those anyway, see websocket_api.py).
+      this._connectSourceAreaId = null;
+      this._connectPreviewPoint = null;
+      return;
+    }
+    this._addConnector(this._connectSourceAreaId, areaId);
+    this._connectSourceAreaId = null;
+    this._connectPreviewPoint = null;
+  }
+
+  _onGraphPointerMove(e) {
+    if (!this._connectMode || !this._connectSourceAreaId) return;
+    const { scale, rect } = this._screenScale(e.currentTarget);
+    this._connectPreviewPoint = {
+      x: this._viewBox.x + (e.clientX - rect.left) * scale,
+      y: this._viewBox.y + (e.clientY - rect.top) * scale,
+    };
+  }
+
+  _addConnector(areaIdA, areaIdB) {
+    const connectors = this._topology.connectors ?? [];
+    const alreadyConnected = connectors.some(
+      (c) =>
+        (c.area_id_a === areaIdA && c.area_id_b === areaIdB) ||
+        (c.area_id_a === areaIdB && c.area_id_b === areaIdA)
+    );
+    if (alreadyConnected) return;
+    const connector = {
+      connector_id: generateConnectorId(),
+      area_id_a: areaIdA,
+      area_id_b: areaIdB,
+    };
+    this._topology = { ...this._topology, connectors: [...connectors, connector] };
+    this._saveTopology();
+  }
+
+  _removeConnector(connectorId) {
+    this._topology = {
+      ...this._topology,
+      connectors: (this._topology.connectors ?? []).filter(
+        (c) => c.connector_id !== connectorId
+      ),
+    };
+    if (this._selectedConnectorId === connectorId) this._selectedConnectorId = null;
+    this._saveTopology();
+  }
+
+  _toggleConnectorSelected(connectorId) {
+    // Touch devices have no hover state, so tapping a connector is the
+    // alternative way to reveal its delete control (desktop can also just
+    // hover — see the `.connector:hover`/`.connector--selected` CSS).
+    this._selectedConnectorId = this._selectedConnectorId === connectorId ? null : connectorId;
+  }
+
+  // -- Egress-point flagging -----------------------------------------------
+
+  // An Area *is* an egress point exactly when it has a non-empty crossing-
+  // entity list (matches the backend's own validation, which rejects an
+  // egress point with zero entities) — so there's no separate on/off flag to
+  // keep in sync, just this list.
+  _setEgressEntities(areaId, entityIds) {
+    const rest = (this._topology.egress_points ?? []).filter((e) => e.area_id !== areaId);
+    const egress_points = entityIds.length ? [...rest, { area_id: areaId, entity_ids: entityIds }] : rest;
+    this._topology = { ...this._topology, egress_points };
+    this._saveTopology();
+  }
+
+  _toggleEgressEntity(areaId, entityId, checked) {
+    const current =
+      (this._topology.egress_points ?? []).find((e) => e.area_id === areaId)?.entity_ids ?? [];
+    const next = checked ? [...current, entityId] : current.filter((id) => id !== entityId);
+    this._setEgressEntities(areaId, next);
+  }
+
+  // -- Per-area entity selection (SPEC.md §5.2) ----------------------------
+
+  // Independent of the access-point crossing-entity list above — an entity
+  // can be in neither, either, or both (e.g. a door sensor can double as
+  // general activity evidence for the room it's in) since the backend
+  // places no exclusivity constraint between the two lists (websocket_api.py
+  // validates them separately), so neither does this UI.
+  _setAreaEntitySelections(areaId, entityIds) {
+    const current = { ...(this._topology.area_entity_selections ?? {}) };
+    if (entityIds.length) {
+      current[areaId] = entityIds;
+    } else {
+      delete current[areaId];
+    }
+    this._topology = { ...this._topology, area_entity_selections: current };
+    this._saveTopology();
+  }
+
+  _toggleAreaEntitySelection(areaId, entityId, checked) {
+    const current = this._topology.area_entity_selections?.[areaId] ?? [];
+    const next = checked ? [...current, entityId] : current.filter((id) => id !== entityId);
+    this._setAreaEntitySelections(areaId, next);
+  }
+
   // -- Persistence ----------------------------------------------------------
 
   async _saveTopology() {
@@ -218,8 +432,21 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         egress_points: this._topology.egress_points ?? [],
         area_entity_selections: this._topology.area_entity_selections ?? {},
         area_positions,
+        // The "Outside" node/edges were removed from the graph (see
+        // docs/DECISIONS.md's 2026-08-09 entry) — access points are shown as
+        // a dashed ring on the room itself instead. outside_position stays a
+        // required field in the backend's save schema (accepts null), so it's
+        // always sent as null now rather than deleting it from the schema
+        // just for this — no reason to force a storage migration over a
+        // field that's simply unused going forward.
+        outside_position: null,
       });
       this._topology = result.topology;
+      // A save can reload the entry (e.g. toggling an access-point entity),
+      // which replaces the engine — resubscribe unconditionally rather than
+      // trying to guess whether this particular save actually triggered
+      // one; a redundant resubscribe when it didn't is cheap and harmless.
+      this._resubscribeEngineState();
     } catch (err) {
       // Optimistic UI already applied the change locally (docs/UX_GUIDELINES.md
       // §2) — a failed background save is logged, not thrown back in the
@@ -254,6 +481,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
   }
 
   _onBackgroundPointerDown(e) {
+    this._selectedConnectorId = null;
     const { scale } = this._screenScale(e.currentTarget);
     const startClientX = e.clientX;
     const startClientY = e.clientY;
@@ -278,6 +506,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
 
   _onNodePointerDown(e, areaId) {
     e.stopPropagation();
+    if (this._connectMode) return; // clicking, not dragging, is how connect mode works
     const svgEl = e.currentTarget.closest("svg");
     const { scale } = this._screenScale(svgEl);
     const start = this._positions.get(areaId) ?? { x: 0, y: 0 };
@@ -313,6 +542,55 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     this._selectedAreaId = areaId;
   }
 
+  async _loadEngineState() {
+    if (!this._entryId || !this.hass) return;
+    try {
+      this._engineState = await this.hass.callWS({
+        type: "occupancy_tracker/engine/get_state",
+        entry_id: this._entryId,
+      });
+    } catch (err) {
+      console.error("Occupancy Tracker: failed to load engine state", err);
+      this._engineState = null;
+    }
+  }
+
+  // One subscription for the panel's whole lifetime, not one per selected
+  // room: the backend already returns every Area's state in a single
+  // snapshot (occupancy_engine.py's engine has no per-Area subscribe
+  // granularity, and there's no reason to invent one just for this), so a
+  // single always-on subscription keeps _engineState fresh regardless of
+  // which room happens to be selected when a change arrives — the bug this
+  // was built to fix was exactly that a *stale* detail panel didn't update
+  // until closed and reopened.
+  async _subscribeEngineState() {
+    if (!this._entryId || !this.hass) return;
+    try {
+      this._engineStateUnsub = await this.hass.connection.subscribeMessage(
+        (event) => {
+          this._engineState = event;
+        },
+        { type: "occupancy_tracker/engine/subscribe_updates", entry_id: this._entryId }
+      );
+    } catch (err) {
+      console.error("Occupancy Tracker: failed to subscribe to engine state", err);
+    }
+  }
+
+  // A topology save can trigger a full entry reload (websocket_api.py's
+  // engine_relevant_change check — e.g. toggling an access-point entity),
+  // which replaces the engine instance entirely. The backend's own
+  // subscription cleanup (entry.async_on_unload) stops forwarding from the
+  // now-dead engine at that point, but nothing re-subscribes to the *new*
+  // one on its own — the websocket connection itself outlives any single
+  // reload, so this side has to notice and re-establish it.
+  async _resubscribeEngineState() {
+    this._engineStateUnsub?.();
+    this._engineStateUnsub = null;
+    await this._loadEngineState();
+    await this._subscribeEngineState();
+  }
+
   render() {
     return html`
       <div class="toolbar">
@@ -332,7 +610,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     if (this._loading) {
       return html`<div class="state">
         <ha-circular-progress indeterminate></ha-circular-progress>
-        <p>Loading topology…</p>
+        <p>Loading your rooms…</p>
       </div>`;
     }
     if (this._error === "not_configured") {
@@ -345,17 +623,17 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     if (this._error) {
       return html`<div class="state">
         <ha-icon icon="mdi:alert-circle-outline"></ha-icon>
-        <p>Couldn't load the topology.</p>
+        <p>Couldn't load your rooms.</p>
         <p class="muted">${this._error}</p>
       </div>`;
     }
     if (this._areaEntries().length === 0) {
       return html`<div class="state">
         <ha-icon icon="mdi:floor-plan"></ha-icon>
-        <p>No areas found.</p>
+        <p>No rooms found.</p>
         <p class="muted">
-          Assign entities to Areas in Settings → Areas & Zones, then come back here to draw
-          connectors between them.
+          Set up your rooms in Settings → Areas &amp; Zones first, then come back here to connect
+          them.
         </p>
       </div>`;
     }
@@ -368,28 +646,21 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         <ha-card class="graph-card">
           <div class="card-header">
             <h1>Areas &amp; connections</h1>
-            <span class="badge">Read-only preview</span>
           </div>
           <p class="card-subtitle">
-            Areas are pulled live from Home Assistant's own Areas &amp; Zones — drag a room to
-            reposition it, or click one to see what Occupancy Tracker currently knows about it.
+            Your rooms, pulled directly from Home Assistant. Drag a room to move it, or click one
+            to choose which sensors to use, flag it as an access point (a door to outside), and
+            see what's happening in it right now.
           </p>
           ${
             hasTopology
-              ? html`<div class="legend">
-                  <span class="legend-item"
-                    ><span class="legend-swatch"></span>Connector — a passage between two areas</span
-                  >
-                  <span class="legend-item"
-                    ><span class="legend-swatch legend-swatch--egress"></span>Egress route to
-                    outside</span
-                  >
-                </div>`
+              ? nothing
               : html`<div class="empty-topology-notice">
                   <ha-icon icon="mdi:vector-line"></ha-icon>
                   <span>
-                    No connections drawn yet. Drawing connectors between areas and marking egress
-                    points is coming in an upcoming update — for now you can arrange your areas.
+                    You haven't connected any rooms yet. Use "Draw connector" below to link two
+                    rooms that are next to each other, or click a room to flag it as an access
+                    point (a door to outside).
                   </span>
                 </div>`
           }
@@ -409,9 +680,37 @@ class OccupancyTrackerTopologyPanel extends LitElement {
               <ha-icon icon=${this._gridEnabled ? "mdi:grid" : "mdi:grid-off"}></ha-icon>
               Grid
             </button>
+            <button
+              class="tool-btn ${this._connectMode ? "tool-btn--active" : ""}"
+              @click=${() => this._toggleConnectMode()}
+            >
+              <ha-icon icon="mdi:link-plus"></ha-icon>
+              ${this._connectMode ? "Drawing connector…" : "Draw connector"}
+            </button>
           </div>
           <div class="graph-wrap">${this._renderGraph()}</div>
-          <p class="caption">Drag to move, scroll to zoom, drag the background to pan.</p>
+          <div class="graph-footer">
+            <p class="caption">
+              ${this._connectMode
+                ? this._connectSourceAreaId
+                  ? "Click another room to connect it, or press Esc to cancel."
+                  : "Click a room to start a connector, or press Esc to stop drawing."
+                : "Drag a room to move it, scroll to zoom, drag the background to pan. Hover or tap a connector, then click × to remove it."}
+            </p>
+            ${
+              hasTopology
+                ? html`<div class="legend">
+                    <span class="legend-item"
+                      ><span class="legend-swatch"></span>Line = these rooms are connected</span
+                    >
+                    <span class="legend-item"
+                      ><span class="legend-swatch legend-swatch--egress"></span>Dashed ring = this
+                      room has an access point (a door to outside)</span
+                    >
+                  </div>`
+                : nothing
+            }
+          </div>
         </ha-card>
         ${this._selectedAreaId ? this._renderDetail() : nothing}
       </div>
@@ -425,35 +724,41 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     return this._houseShape?.areas ?? [];
   }
 
+  // Mirrors topology_store.py's active_area_ids(): a room only gets real HA
+  // entities (and is only actually tracked) once it has at least one
+  // activity-evidence entity selected or is an access point — project-owner
+  // feedback that an untouched room's sensors were pure clutter. Used here
+  // to visually dim untracked rooms in the graph and explain why in the
+  // detail panel, so the backend's housekeeping doesn't look like rooms are
+  // silently missing.
+  _isAreaActive(areaId) {
+    const hasEvidence = (this._topology.area_entity_selections?.[areaId] ?? []).length > 0;
+    const isAccessPoint = (this._topology.egress_points ?? []).some((e) => e.area_id === areaId);
+    return hasEvidence || isAccessPoint;
+  }
+
   _renderGraph() {
     const areas = this._areaEntries();
     const connectors = this._topology.connectors ?? [];
     const egressPoints = this._topology.egress_points ?? [];
     const egressAreaIds = new Set(egressPoints.map((e) => e.area_id));
-    const hasOutside = egressAreaIds.size > 0;
     const positions = this._positions;
-
-    let outside = null;
-    if (hasOutside && positions.size) {
-      const allPoints = [...positions.values()];
-      const minX = Math.min(...allPoints.map((p) => p.x));
-      const maxX = Math.max(...allPoints.map((p) => p.x));
-      const minY = Math.min(...allPoints.map((p) => p.y));
-      outside = { x: (minX + maxX) / 2, y: minY - 100 };
-    }
 
     const vb = this._viewBox;
 
     return svg`
       <svg
         viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}"
-        class="graph ${this._panning ? "graph--panning" : ""}"
+        class="graph ${this._panning ? "graph--panning" : ""} ${
+          this._connectMode ? "graph--connecting" : ""
+        }"
         @wheel=${(e) => this._onWheel(e)}
         @pointerdown=${(e) => this._onBackgroundPointerDown(e)}
+        @pointermove=${(e) => this._onGraphPointerMove(e)}
       >
         <defs>
           <pattern id="ot-grid" width=${GRID_SIZE} height=${GRID_SIZE} patternUnits="userSpaceOnUse">
-            <circle cx="1" cy="1" r="1.4" class="grid-dot"></circle>
+            <circle cx="0" cy="0" r="1.4" class="grid-dot"></circle>
           </pattern>
         </defs>
         ${
@@ -461,29 +766,70 @@ class OccupancyTrackerTopologyPanel extends LitElement {
             ? svg`<rect x=${vb.x} y=${vb.y} width=${vb.w} height=${vb.h} fill="url(#ot-grid)"></rect>`
             : nothing
         }
-        ${
-          outside
-            ? [...egressAreaIds].map((areaId) => {
-                const p = positions.get(areaId);
-                return p
-                  ? svg`<line class="edge edge--egress" x1=${outside.x} y1=${outside.y} x2=${p.x} y2=${p.y}></line>`
-                  : nothing;
-              })
-            : nothing
-        }
         ${connectors.map((connector) => {
           const a = positions.get(connector.area_id_a);
           const b = positions.get(connector.area_id_b);
-          return a && b
-            ? svg`<line class="edge" x1=${a.x} y1=${a.y} x2=${b.x} y2=${b.y}></line>`
-            : nothing;
+          if (!a || !b) return nothing;
+          // The delete control sits at the true midpoint between the node
+          // centers — trimming both ends by the same radius doesn't move
+          // that midpoint, so it's computed from a/b, not the trimmed points.
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
+          const aEdge = pointTowardsEdge(a, b, NODE_RADIUS);
+          const bEdge = pointTowardsEdge(b, a, NODE_RADIUS);
+          const selected = connector.connector_id === this._selectedConnectorId;
+          return svg`
+            <g
+              class="connector ${selected ? "connector--selected" : ""}"
+              tabindex="0"
+              role="button"
+              aria-label="Remove connector"
+              @keydown=${(e) => {
+                if (e.key === "Enter" || e.key === "Delete" || e.key === "Backspace") {
+                  e.preventDefault();
+                  this._removeConnector(connector.connector_id);
+                }
+              }}
+            >
+              <line
+                class="edge-hit"
+                x1=${aEdge.x}
+                y1=${aEdge.y}
+                x2=${bEdge.x}
+                y2=${bEdge.y}
+                @click=${(e) => {
+                  e.stopPropagation();
+                  if (!this._connectMode) this._toggleConnectorSelected(connector.connector_id);
+                }}
+              ></line>
+              <line class="edge" x1=${aEdge.x} y1=${aEdge.y} x2=${bEdge.x} y2=${bEdge.y}></line>
+              <g
+                class="edge-delete"
+                transform="translate(${mx}, ${my})"
+                @click=${(e) => {
+                  e.stopPropagation();
+                  this._removeConnector(connector.connector_id);
+                }}
+              >
+                <circle r="9"></circle>
+                <path d="M-4,-4 L4,4 M-4,4 L4,-4"></path>
+              </g>
+            </g>
+          `;
         })}
         ${
-          outside
-            ? svg`<g class="node node--outside" transform="translate(${outside.x}, ${outside.y})">
-                <circle r=${NODE_RADIUS}></circle>
-                <text dy=${NODE_RADIUS + 16}>Outside</text>
-              </g>`
+          this._connectSourceAreaId && this._connectPreviewPoint && positions.get(this._connectSourceAreaId)
+            ? (() => {
+                const src = positions.get(this._connectSourceAreaId);
+                const start = pointTowardsEdge(src, this._connectPreviewPoint, NODE_RADIUS);
+                return svg`<line
+                  class="edge edge--preview"
+                  x1=${start.x}
+                  y1=${start.y}
+                  x2=${this._connectPreviewPoint.x}
+                  y2=${this._connectPreviewPoint.y}
+                ></line>`;
+              })()
             : nothing
         }
         ${areas.map((area) => {
@@ -491,9 +837,18 @@ class OccupancyTrackerTopologyPanel extends LitElement {
           if (!p) return nothing;
           const isEgress = egressAreaIds.has(area.area_id);
           const selected = area.area_id === this._selectedAreaId;
-          const classes = ["node", isEgress ? "node--egress" : "", selected ? "node--selected" : ""]
+          const isConnectSource = area.area_id === this._connectSourceAreaId;
+          const classes = [
+            "node",
+            isEgress ? "node--egress" : "",
+            selected ? "node--selected" : "",
+            isConnectSource ? "node--connect-source" : "",
+            this._isAreaActive(area.area_id) ? "" : "node--inactive",
+          ]
             .filter(Boolean)
             .join(" ");
+          const onActivate = () =>
+            this._connectMode ? this._onNodeConnectClick(area.area_id) : this._selectArea(area.area_id);
           return svg`
             <g
               class=${classes}
@@ -502,18 +857,81 @@ class OccupancyTrackerTopologyPanel extends LitElement {
               role="button"
               aria-label=${area.name}
               @pointerdown=${(e) => this._onNodePointerDown(e, area.area_id)}
-              @click=${() => this._selectArea(area.area_id)}
+              @click=${onActivate}
               @keydown=${(e) => {
-                if (e.key === "Enter" || e.key === " ") this._selectArea(area.area_id);
+                if (e.key === "Enter" || e.key === " ") onActivate();
               }}
             >
               <circle r=${NODE_RADIUS}></circle>
+              ${
+                this._isAreaActive(area.area_id)
+                  ? svg`<text class="node-count" dy="0.35em">${this._engineState?.areas?.[area.area_id]?.occupant_count ?? 0}</text>`
+                  : nothing
+              }
               <text dy=${NODE_RADIUS + 16}>${area.name}</text>
             </g>
           `;
         })}
       </svg>
     `;
+  }
+
+  // The explainability inspector (SPEC.md §7.3's "how did it know that"
+  // moment) — live signals, confidence tier, and transit reasoning for the
+  // selected Area, fetched from occupancy_tracker/engine/get_state.
+  _renderExplainability(area) {
+    const state = this._engineState?.areas?.[area.area_id];
+    if (!state) {
+      return html`<p class="muted">Loading current state…</p>`;
+    }
+    const pendingTransit = (this._engineState.pending_transits ?? []).find(
+      (t) => t.area_id_a === area.area_id || t.area_id_b === area.area_id
+    );
+    const qualityKey = state.quality.toLowerCase();
+    const qualityLabel = QUALITY_LABELS[state.quality] ?? state.quality;
+
+    return html`
+      <div class="explain">
+        <div class="explain-row">
+          <span class="chip chip--${qualityKey}">${qualityLabel}</span>
+          <span class="occupant-count">
+            ${state.occupant_count} occupant${state.occupant_count === 1 ? "" : "s"}
+          </span>
+        </div>
+        <p class="muted">
+          Last confirmed:
+          ${state.last_confirmed ? this._formatRelativeTime(state.last_confirmed) : "never"}
+          ${state.last_provenance
+            ? html` — ${PROVENANCE_LABELS[state.last_provenance] ?? state.last_provenance}`
+            : nothing}
+        </p>
+        ${pendingTransit
+          ? html`<p class="explain-pending">
+              <ha-icon icon="mdi:transit-connection-variant"></ha-icon>
+              Unconfirmed transit ${this._transitOtherSideLabel(pendingTransit, area.area_id)}
+            </p>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  _transitOtherSideLabel(transit, areaId) {
+    const otherId = transit.area_id_a === areaId ? transit.area_id_b : transit.area_id_a;
+    if (otherId === "outside") return "with Outside";
+    const other = this._areaEntries().find((a) => a.area_id === otherId);
+    return other ? `with ${other.name}` : "";
+  }
+
+  _formatRelativeTime(isoString) {
+    const diffMs = new Date(isoString).getTime() - Date.now();
+    const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    const diffSeconds = Math.round(diffMs / 1000);
+    if (Math.abs(diffSeconds) < 60) return rtf.format(diffSeconds, "second");
+    const diffMinutes = Math.round(diffSeconds / 60);
+    if (Math.abs(diffMinutes) < 60) return rtf.format(diffMinutes, "minute");
+    const diffHours = Math.round(diffMinutes / 60);
+    if (Math.abs(diffHours) < 24) return rtf.format(diffHours, "hour");
+    return rtf.format(Math.round(diffHours / 24), "day");
   }
 
   _renderDetail() {
@@ -534,23 +952,76 @@ class OccupancyTrackerTopologyPanel extends LitElement {
           </ha-icon-button>
         </div>
         <div class="detail-body">
+          ${
+            this._isAreaActive(area.area_id)
+              ? nothing
+              : html`<div class="empty-topology-notice">
+                  <ha-icon icon="mdi:sleep"></ha-icon>
+                  <span
+                    >Not tracked yet — pick an access point or something under "What counts as
+                    activity" below to start counting occupancy in this room.</span
+                  >
+                </div>`
+          }
+          ${this._renderExplainability(area)}
           <p class="row">
             <ha-icon icon=${egressPoint ? "mdi:door-open" : "mdi:door-closed"}></ha-icon>
-            ${egressPoint ? "Egress point" : "Not an egress point"}
+            ${egressPoint ? "Access point" : "Not an access point"}
           </p>
-          ${egressPoint
-            ? html`<ul>
-                ${egressPoint.entity_ids.map(
-                  (id) => html`<li>${this._entityLabel(id, entitiesById)}</li>`
-                )}
+          <p class="muted">
+            Check the door or window sensor(s) in this room that would notice someone coming in
+            or going out.
+          </p>
+          ${area.entity_ids.length
+            ? html`<ul class="checklist">
+                ${area.entity_ids.map((id) => {
+                  const checked = egressPoint?.entity_ids.includes(id) ?? false;
+                  return html`
+                    <li>
+                      <label class="checklist-item">
+                        <input
+                          type="checkbox"
+                          .checked=${checked}
+                          @change=${(e) =>
+                            this._toggleEgressEntity(area.area_id, id, e.target.checked)}
+                        />
+                        <span title=${id}>${this._entityLabel(id, entitiesById)}</span>
+                      </label>
+                    </li>
+                  `;
+                })}
               </ul>`
-            : nothing}
-          <p class="row"><ha-icon icon="mdi:cog-outline"></ha-icon> Selected entities</p>
-          ${selectedEntityIds.length
-            ? html`<ul>
-                ${selectedEntityIds.map((id) => html`<li>${this._entityLabel(id, entitiesById)}</li>`)}
+            : html`<p class="muted">
+                This room has no sensors or devices in Home Assistant yet.
+              </p>`}
+          <p class="row"><ha-icon icon="mdi:eye-check-outline"></ha-icon> What counts as activity</p>
+          <p class="muted">
+            Check any sensors or devices that mean someone's in this room — a motion sensor, a
+            light turning on, a TV switching on. This room is only ever counted as occupied
+            because of these.
+          </p>
+          ${area.entity_ids.length
+            ? html`<ul class="checklist">
+                ${area.entity_ids.map((id) => {
+                  const checked = selectedEntityIds.includes(id);
+                  return html`
+                    <li>
+                      <label class="checklist-item">
+                        <input
+                          type="checkbox"
+                          .checked=${checked}
+                          @change=${(e) =>
+                            this._toggleAreaEntitySelection(area.area_id, id, e.target.checked)}
+                        />
+                        <span title=${id}>${this._entityLabel(id, entitiesById)}</span>
+                      </label>
+                    </li>
+                  `;
+                })}
               </ul>`
-            : html`<p class="muted">No entities selected for this area yet.</p>`}
+            : html`<p class="muted">
+                This room has no sensors or devices in Home Assistant yet.
+              </p>`}
         </div>
       </ha-card>
     `;
@@ -558,8 +1029,8 @@ class OccupancyTrackerTopologyPanel extends LitElement {
 
   _entityLabel(entityId, entitiesById) {
     const entity = entitiesById.get(entityId);
-    if (entity?.disabled) return `${entityId} (disabled)`;
-    return entityId;
+    const label = entity?.name || entityId;
+    return entity?.disabled ? `${label} (disabled)` : label;
   }
 
   static styles = css`
@@ -653,11 +1124,17 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       font-size: 14px;
       margin: 4px 0 16px;
     }
+    .graph-footer {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+      margin-top: 8px;
+    }
     .legend {
       display: flex;
       flex-wrap: wrap;
       gap: 16px;
-      margin-bottom: 12px;
     }
     .legend-item {
       display: flex;
@@ -672,8 +1149,14 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       height: 0;
       border-top: 2px solid var(--divider-color, #e0e0e0);
     }
+    /* Mirrors .node--egress circle's own dashed ring, not a line — access
+       points are shown as a style on the room's own node, not a separate
+       edge (see docs/DECISIONS.md's 2026-08-09 "Outside" node removal). */
     .legend-swatch--egress {
-      border-top-style: dashed;
+      width: 14px;
+      height: 14px;
+      border: 2px dashed var(--primary-color);
+      border-radius: 50%;
     }
     .empty-topology-notice {
       display: flex;
@@ -722,10 +1205,9 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       background: var(--primary-color);
     }
     .caption {
-      text-align: center;
       color: var(--secondary-text-color);
       font-size: 12px;
-      margin: 8px 0 0;
+      margin: 0;
     }
     .detail-card {
       width: 320px;
@@ -755,16 +1237,59 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     .graph--panning {
       cursor: grabbing;
     }
+    .graph--connecting .node circle {
+      cursor: pointer;
+    }
     .grid-dot {
       fill: var(--secondary-text-color);
       opacity: 0.3;
     }
     .edge {
-      stroke: var(--divider-color, #e0e0e0);
+      /* A lighter tint of the same color used for area nodes, not an
+         unrelated neutral grey — --rgb-primary-color is a real HA theme
+         token (verified present in the installed hass_frontend bundle). */
+      stroke: rgba(var(--rgb-primary-color), 0.5);
       stroke-width: 2;
     }
-    .edge--egress {
-      stroke-dasharray: 4 4;
+    .edge--preview {
+      stroke: var(--primary-color);
+      stroke-width: 2;
+      stroke-dasharray: 5 4;
+      pointer-events: none;
+    }
+    .connector {
+      outline: none;
+    }
+    .connector:hover .edge,
+    .connector:focus-visible .edge,
+    .connector--selected .edge {
+      stroke: var(--error-color, #db4437);
+      stroke-width: 3;
+    }
+    .edge-hit {
+      stroke: transparent;
+      stroke-width: 16;
+      pointer-events: stroke;
+      cursor: pointer;
+    }
+    .edge-delete {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+      cursor: pointer;
+    }
+    .connector:hover .edge-delete,
+    .connector:focus-visible .edge-delete,
+    .connector--selected .edge-delete {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .edge-delete circle {
+      fill: var(--error-color, #db4437);
+    }
+    .edge-delete path {
+      stroke: white;
+      stroke-width: 1.6;
     }
     .node circle {
       fill: var(--card-background-color);
@@ -778,16 +1303,38 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       text-anchor: middle;
       pointer-events: none;
     }
+    .node text.node-count {
+      font-size: 15px;
+      font-weight: 600;
+    }
     .node--egress circle {
       stroke-dasharray: 3 2;
+    }
+    /* Not tracked yet — no activity evidence and not an access point, so
+       this room has no HA entities at all (project-owner feedback: an
+       untouched room shouldn't get sensors, but should still look visibly
+       different so that's not mistaken for a bug). Dims via stroke-opacity,
+       not element-level opacity on the whole circle — opacity there would
+       make the node's own fill translucent too, letting a connector line
+       drawn underneath bleed through it (the line endpoints are also now
+       trimmed to the circle's edge, so this is belt-and-braces, not the only
+       fix — see pointTowardsEdge's comment). */
+    .node--inactive circle {
+      stroke: var(--secondary-text-color);
+      stroke-opacity: 0.6;
+    }
+    .node--inactive text {
+      opacity: 0.6;
     }
     .node--selected circle {
       fill: var(--primary-color);
     }
-    .node--outside circle {
-      fill: var(--secondary-background-color, #eee);
-      stroke: var(--secondary-text-color);
-      stroke-dasharray: 3 2;
+    .node--selected text.node-count {
+      fill: var(--text-primary-color, white);
+    }
+    .node--connect-source circle {
+      stroke: var(--primary-color);
+      stroke-width: 4;
     }
     .node:focus-visible circle {
       stroke-width: 4;
@@ -812,11 +1359,71 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       gap: 8px;
       font-weight: 500;
     }
+    .explain {
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--divider-color, #e0e0e0);
+    }
+    .explain-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .chip {
+      font-size: 12px;
+      font-weight: 500;
+      padding: 2px 10px;
+      border-radius: 12px;
+      color: white;
+    }
+    .chip--confirmed {
+      background: var(--success-color, #4caf50);
+    }
+    .chip--latched {
+      background: var(--secondary-text-color, #888);
+    }
+    .chip--ambiguous {
+      background: var(--warning-color, #ff9800);
+    }
+    .occupant-count {
+      font-weight: 500;
+    }
+    .explain-pending {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 4px 0 0;
+      font-size: 13px;
+      color: var(--warning-color, #ff9800);
+    }
+    .explain-pending ha-icon {
+      --mdc-icon-size: 16px;
+    }
     .detail-body ul {
       margin: 4px 0 16px;
       padding-left: 16px;
       color: var(--secondary-text-color);
       font-size: 14px;
+    }
+    .checklist {
+      list-style: none;
+      padding-left: 0;
+    }
+    .checklist-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+      color: var(--primary-text-color);
+      cursor: pointer;
+    }
+    .checklist-item input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--primary-color);
+      cursor: pointer;
+      flex-shrink: 0;
     }
   `;
 }

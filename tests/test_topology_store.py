@@ -19,6 +19,7 @@ from custom_components.occupancy_tracker.topology_store import (
     EgressPoint,
     TopologyData,
     TopologyStore,
+    active_area_ids,
 )
 
 
@@ -38,6 +39,7 @@ def _house_shape(
             platform="test",
             disabled=False,
             hidden=False,
+            name=entity_id,
         )
         for entity_id, area_id in (entities or {}).items()
     }
@@ -63,6 +65,7 @@ async def test_save_and_load_roundtrip(hass: HomeAssistant) -> None:
             {"area_kitchen": ("binary_sensor.kitchen_motion",)}
         ),
         area_positions=MappingProxyType({"area_kitchen": (12.5, -30.0)}),
+        outside_position=(1.0, -50.0),
     )
 
     writer = TopologyStore(hass, "entry-1")
@@ -108,6 +111,22 @@ async def test_migrate_func_defaults_area_positions_for_pre_1_2_data(hass: HomeA
     result = await store._store._async_migrate_func(1, 1, raw)
 
     assert result["area_positions"] == {}
+
+
+async def test_migrate_func_defaults_outside_position_for_pre_1_3_data(
+    hass: HomeAssistant,
+) -> None:
+    store = TopologyStore(hass, "entry-1")
+    raw = {
+        "connectors": [],
+        "egress_points": [],
+        "area_entity_selections": {},
+        "area_positions": {},
+    }
+
+    result = await store._store._async_migrate_func(1, 2, raw)
+
+    assert result["outside_position"] is None
 
 
 async def test_migrate_func_rejects_newer_major_version(hass: HomeAssistant) -> None:
@@ -251,3 +270,35 @@ async def test_reconcile_and_save_only_persists_when_something_changed(
     removed = await store.async_reconcile_and_save(_house_shape(("kitchen",)))
     assert removed
     assert save_calls == 1
+
+
+def test_active_area_ids_includes_areas_with_activity_evidence() -> None:
+    topology = TopologyData(area_entity_selections={"kitchen": ("binary_sensor.kitchen_motion",)})
+
+    assert active_area_ids(topology) == frozenset({"kitchen"})
+
+
+def test_active_area_ids_includes_access_points() -> None:
+    topology = TopologyData(
+        egress_points=(EgressPoint(area_id="hallway", entity_ids=("binary_sensor.front_door",)),)
+    )
+
+    assert active_area_ids(topology) == frozenset({"hallway"})
+
+
+def test_active_area_ids_excludes_areas_with_nothing_selected() -> None:
+    # An empty-tuple entry (rather than the key being absent entirely) must
+    # still count as "nothing selected" — the frontend always deletes the
+    # key on full deselect, but the store itself shouldn't rely on that.
+    topology = TopologyData(area_entity_selections={"study": ()})
+
+    assert active_area_ids(topology) == frozenset()
+
+
+def test_active_area_ids_unions_evidence_and_access_points() -> None:
+    topology = TopologyData(
+        area_entity_selections={"kitchen": ("binary_sensor.kitchen_motion",)},
+        egress_points=(EgressPoint(area_id="hallway", entity_ids=("binary_sensor.front_door",)),),
+    )
+
+    assert active_area_ids(topology) == frozenset({"kitchen", "hallway"})

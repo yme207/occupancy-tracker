@@ -149,6 +149,54 @@ async def test_entity_disabled_and_hidden_flags(
     assert snapshot.hidden is True
 
 
+async def test_entity_name_uses_full_display_name(
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    device_registry: dr.DeviceRegistry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """The topology panel's entity checklists (SPEC.md §5.2) need a human name,
+    not a raw entity_id — `EntitySnapshot.name` must be the same display name
+    HA's own UI would compute (`entity_registry.async_get_full_entity_name`),
+    not something this layer re-derives itself.
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    device_id = _mock_device(hass, device_registry, name="Kitchen Hub")
+    device_registry.async_update_device(device_id, area_id=kitchen.id)
+    entry = entity_registry.async_get_or_create(
+        "binary_sensor",
+        "test",
+        "unique-name-1",
+        suggested_object_id="kitchen_motion",
+        device_id=device_id,
+        original_name="Motion",
+        has_entity_name=True,
+    )
+
+    registry_sync = RegistrySync(hass)
+    snapshot = registry_sync.house_shape.entities[entry.entity_id]
+
+    assert snapshot.name == er.async_get_full_entity_name(hass, entry)
+    assert snapshot.name != entry.entity_id
+
+
+async def test_entity_name_falls_back_to_entity_id(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """No name info at all (no device, no original_name) is a real, if
+    unusual, registry state — must not surface as a blank label.
+    """
+    entry = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "unique-name-2", suggested_object_id="nameless"
+    )
+
+    registry_sync = RegistrySync(hass)
+    snapshot = registry_sync.house_shape.entities[entry.entity_id]
+
+    assert snapshot.name == entry.entity_id
+
+
 async def test_live_area_creation_triggers_listener_and_rebuild(
     hass: HomeAssistant,
     area_registry: ar.AreaRegistry,

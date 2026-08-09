@@ -452,3 +452,75 @@ def test_confirmed_transit_records_the_confirming_signals_provenance_on_both_are
         engine.area_state("hallway", corroborated).last_provenance
         == ProvenanceTier.AMBIGUOUS_PHYSICAL
     )
+
+
+def test_override_occupant_count_sets_value_directly() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    engine.override_occupant_count("kitchen", 3, T0)
+
+    state = engine.area_state("kitchen", T0)
+    assert state.occupant_count == 3
+    assert state.last_confirmed == T0
+    assert state.last_provenance == ProvenanceTier.USER_CONFIRMED
+    assert state.quality == StateQuality.CONFIRMED
+
+
+def test_override_occupant_count_rejects_unknown_area() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    with pytest.raises(ValueError, match="Unknown area"):
+        engine.override_occupant_count("attic", 1, T0)
+
+
+def test_override_occupant_count_rejects_negative_count() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    with pytest.raises(ValueError, match="negative"):
+        engine.override_occupant_count("kitchen", -1, T0)
+
+
+def test_override_occupant_count_clears_pending_transit_touching_the_area() -> None:
+    """A manual correction is more authoritative than an unresolved automatic
+    guess about the same Area — the stale guess must not still be sitting
+    there afterward, e.g. later resolving and changing counts out from under
+    the override, or holding the Area's quality at AMBIGUOUS.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    fired = T0 + timedelta(seconds=5)
+    engine.process_signal(ConnectorActivitySignal("c1", fired, source="s2"))
+    assert engine.pending_transit_connector_ids(fired) == frozenset({"c1"})
+
+    override_time = fired + timedelta(seconds=1)
+    engine.override_occupant_count("hallway", 0, override_time)
+
+    assert engine.pending_transit_connector_ids(override_time) == frozenset()
+    assert engine.area_state("hallway", override_time).quality == StateQuality.CONFIRMED
+
+
+def test_override_occupant_count_notifies_listeners() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    calls = 0
+
+    def on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    engine.add_listener(on_change)
+    engine.override_occupant_count("kitchen", 2, T0)
+
+    assert calls == 1
+
+
+def test_household_size_hint_defaults_to_none() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    assert engine.household_size_hint is None
+
+
+def test_household_size_hint_reflects_config() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)), EngineConfig(household_size_hint=4))
+
+    assert engine.household_size_hint == 4

@@ -12,20 +12,25 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .registry_sync import HouseShape
 
+if TYPE_CHECKING:
+    from . import OccupancyTrackerConfigEntry
+
 _LOGGER = logging.getLogger(__name__)
 
 # Bumped whenever the persisted shape changes; _TopologyStorageStore's
 # migration hook is where old data gets upgraded to match. 1.1 -> 1.2 added
-# area_positions (manual node layout for the topology editor panel).
+# area_positions (manual node layout for the topology editor panel). 1.2 ->
+# 1.3 added outside_position (manual position for the synthesized "Outside"
+# node the panel draws once at least one egress point exists).
 STORAGE_VERSION_MAJOR = 1
-STORAGE_VERSION_MINOR = 2
+STORAGE_VERSION_MINOR = 3
 _STORAGE_KEY_PREFIX = "occupancy_tracker_topology"
 
 
@@ -61,6 +66,11 @@ class TopologyData:
     area_positions: Mapping[str, tuple[float, float]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    #: Manually-placed position for the panel's synthesized "Outside" node
+    #: (there is no real Area for it to key against). `None` means the panel
+    #: should fall back to its own computed default. Purely a display
+    #: concern, like `area_positions` — never read by the engine.
+    outside_position: tuple[float, float] | None = None
 
 
 class ConnectorDict(TypedDict):
@@ -84,6 +94,7 @@ class TopologyDict(TypedDict):
     egress_points: list[EgressPointDict]
     area_entity_selections: dict[str, list[str]]
     area_positions: dict[str, PositionDict]
+    outside_position: PositionDict | None
 
 
 def topology_to_dict(topology: TopologyData) -> TopologyDict:
@@ -113,6 +124,11 @@ def topology_to_dict(topology: TopologyData) -> TopologyDict:
         "area_positions": {
             area_id: {"x": x, "y": y} for area_id, (x, y) in topology.area_positions.items()
         },
+        "outside_position": (
+            {"x": topology.outside_position[0], "y": topology.outside_position[1]}
+            if topology.outside_position is not None
+            else None
+        ),
     }
 
 
@@ -143,6 +159,11 @@ def topology_from_dict(data: TopologyDict) -> TopologyData:
                 for area_id, position in data["area_positions"].items()
             }
         ),
+        outside_position=(
+            (data["outside_position"]["x"], data["outside_position"]["y"])
+            if data["outside_position"] is not None
+            else None
+        ),
     )
 
 
@@ -170,6 +191,11 @@ class _TopologyStorageStore(Store[TopologyDict]):
             # manually-placed nodes, so an empty map is the correct default,
             # not a guess.
             old_data.setdefault("area_positions", {})
+        if old_major_version == 1 and old_minor_version < 3:
+            # 1.3 added outside_position; older data never had a manually-
+            # placed "Outside" node, so None (fall back to the panel's
+            # computed default) is the correct default, not a guess.
+            old_data.setdefault("outside_position", None)
         return old_data  # type: ignore[return-value]
 
 
@@ -282,6 +308,7 @@ class TopologyStore:
             egress_points=tuple(egress_points),
             area_entity_selections=MappingProxyType(area_entity_selections),
             area_positions=MappingProxyType(area_positions),
+            outside_position=current.outside_position,
         )
         return cleaned, removed
 
@@ -293,3 +320,117 @@ class TopologyStore:
                 _LOGGER.warning("Occupancy Tracker topology reconciliation: %s", message)
             await self.async_save(cleaned)
         return removed
+
+
+def active_area_ids(topology: TopologyData) -> frozenset[str]:
+    """Areas the user has actually opted into tracking: at least one selected
+    activity-evidence entity, or flagged as an access point (which itself
+    requires at least one crossing entity — SPEC.md §7.3's own validation).
+
+    Entity platforms (`sensor.py`/`binary_sensor.py`) use this to only create
+    per-Area entities for Areas with real signal — project-owner feedback:
+    an Area with nothing selected is one the user has implicitly said they
+    don't want tracked, and a permanently-zero, never-updating sensor for it
+    is clutter, not a useful default. The occupancy *engine* still tracks
+    every Area regardless (`engine_adapter.build_house_graph` — a
+    sensor-less Area can still be a valid pass-through node for transit
+    inference, SPEC.md §5.1), so this only ever affects what's exposed as HA
+    entities, never what the engine reasons over.
+    """
+    with_evidence = {
+        area_id for area_id, entity_ids in topology.area_entity_selections.items() if entity_ids
+    }
+    access_points = {egress.area_id for egress in topology.egress_points}
+    return frozenset(with_evidence | access_points)
+
+
+def validate_topology(topology: TopologyData, house_shape: HouseShape) -> list[str]:
+    """Reject references to Areas/entities the live registries don't have.
+
+    Shared by the websocket save command (`websocket_api.py`) and the
+    topology-import service (`services.py`) — docs/ARCHITECTURE.md's
+    anti-duplication rule. Unlike `TopologyStore.reconcile()` (which silently
+    drops stale references after a *registry* change, SPEC.md §5.3), a
+    topology submitted through either of those entry points should never
+    contain one in the first place; surfacing it as a rejected write is more
+    useful to whoever/whatever submitted it than quietly discarding part of
+    it.
+    """
+    errors: list[str] = []
+    connector_ids: set[str] = set()
+    for connector in topology.connectors:
+        if connector.connector_id in connector_ids:
+            errors.append(f"Duplicate connector_id: {connector.connector_id}")
+        connector_ids.add(connector.connector_id)
+        if connector.area_id_a == connector.area_id_b:
+            errors.append(
+                f"Connector {connector.connector_id} connects area {connector.area_id_a} to itself"
+            )
+        for area_id in (connector.area_id_a, connector.area_id_b):
+            if area_id not in house_shape.areas:
+                errors.append(
+                    f"Connector {connector.connector_id} references unknown area {area_id}"
+                )
+
+    for egress in topology.egress_points:
+        if egress.area_id not in house_shape.areas:
+            errors.append(f"Egress point references unknown area {egress.area_id}")
+        if not egress.entity_ids:
+            errors.append(f"Egress point for area {egress.area_id} has no crossing entities")
+        for entity_id in egress.entity_ids:
+            if entity_id not in house_shape.entities:
+                errors.append(
+                    f"Egress point for area {egress.area_id} references unknown entity {entity_id}"
+                )
+
+    for area_id, entity_ids in topology.area_entity_selections.items():
+        if area_id not in house_shape.areas:
+            errors.append(f"Entity selection references unknown area {area_id}")
+        for entity_id in entity_ids:
+            entity = house_shape.entities.get(entity_id)
+            if entity is None:
+                errors.append(
+                    f"Entity selection for area {area_id} references unknown entity {entity_id}"
+                )
+            elif entity.area_id != area_id:
+                errors.append(
+                    f"Entity selection for area {area_id} references entity {entity_id}, "
+                    f"which is actually in area {entity.area_id}"
+                )
+
+    for area_id in topology.area_positions:
+        if area_id not in house_shape.areas:
+            errors.append(f"Node position references unknown area {area_id}")
+
+    return errors
+
+
+async def async_replace_topology(
+    hass: HomeAssistant, entry: OccupancyTrackerConfigEntry, topology: TopologyData
+) -> list[str]:
+    """Validate, persist, and (if engine-relevant) reload for a full topology replacement.
+
+    Shared by `websocket_api.py`'s save command and `services.py`'s
+    topology-import service, so "validate against the live house shape, then
+    persist, then reload only if something the engine actually cares about
+    changed" lives in exactly one place rather than being re-derived per
+    caller (docs/ARCHITECTURE.md's anti-duplication rule). Returns a list of
+    validation errors — empty on success, with nothing persisted or reloaded
+    when non-empty.
+    """
+    house_shape = entry.runtime_data.registry_sync.house_shape
+    errors = validate_topology(topology, house_shape)
+    if errors:
+        return errors
+
+    previous = entry.runtime_data.topology_store.topology
+    engine_relevant_change = (
+        topology.connectors != previous.connectors
+        or topology.egress_points != previous.egress_points
+        or dict(topology.area_entity_selections) != dict(previous.area_entity_selections)
+    )
+
+    await entry.runtime_data.topology_store.async_save(topology)
+    if engine_relevant_change:
+        await hass.config_entries.async_reload(entry.entry_id)
+    return []

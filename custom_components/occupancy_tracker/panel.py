@@ -1,11 +1,23 @@
 """Registers the topology editor's frontend panel (docs/SPEC.md §7.3).
 
 Backend-only wiring: serves the bundled `www/` directory as a static path and
-registers a `panel_custom` panel that the frontend surfaces inside Settings →
-Devices & Services → Occupancy Tracker → Configure (via `config_panel_domain`)
-as well as at its own stable, independently-openable URL. The panel itself
-talks only to the websocket API in `websocket_api.py`; this module never
-touches the topology store directly (docs/ARCHITECTURE.md §1.6).
+registers a `panel_custom` panel that the frontend surfaces as its own
+sidebar item (`sidebar_title`/`sidebar_icon`) so it's always one click away.
+Deliberately *not* passed `config_panel_domain` (tried in an earlier
+session): that parameter makes Settings → Devices & Services → Occupancy
+Tracker → Configure open this panel *instead of* the options flow — with no
+other way to reach the options flow at all (verified against the frontend's
+own `ha-config-entry-row.ts`: the row's "Configure" gear picks one or the
+other, and the overflow menu has no separate "Options" entry as a fallback).
+That silently made the zone-fusion/tunable settings (`config_flow.py`)
+unreachable through the UI the moment `config_panel_domain` was added, since
+the sidebar entry (which *does* reach this panel) was the only surviving
+path. Leaving `config_panel_domain` unset restores the options flow to the
+gear icon — the standard, expected place for it — while the sidebar item
+remains the primary, more-discoverable way to reach the topology panel. The
+panel itself talks only to the websocket API in `websocket_api.py`; this
+module never touches the topology store directly (docs/ARCHITECTURE.md
+§1.6).
 
 Registration must happen at most once per HA runtime, not once per
 config-entry setup: `panel_custom.async_register_panel()` raises if called
@@ -49,6 +61,7 @@ async def async_setup(hass: HomeAssistant) -> None:
         frontend_url_path=DOMAIN,
         webcomponent_name=_WEBCOMPONENT_NAME,
         module_url=f"{_STATIC_URL_PATH}/{_PANEL_MODULE}",
+        sidebar_title="Occupancy Tracker",
+        sidebar_icon="mdi:home-search",
         require_admin=True,
-        config_panel_domain=DOMAIN,
     )
