@@ -35,9 +35,14 @@ working end-to-end against a real Home Assistant instance. Packaging for HACS di
 
 ## Installation
 
-Not yet distributed via HACS (see "Status" above). Until then: clone this repository and copy
-`custom_components/occupancy_tracker/` into your Home Assistant `config/custom_components/`
-directory, restart Home Assistant, then add the integration from Settings → Devices & Services.
+Not yet distributed via HACS (see "Status" above). Until then:
+
+```
+git clone https://github.com/yme207/occupancy-tracker.git
+```
+
+then copy `custom_components/occupancy_tracker/` into your Home Assistant `config/custom_components/`
+directory, restart Home Assistant, and add the integration from Settings → Devices & Services.
 
 ## Getting started
 

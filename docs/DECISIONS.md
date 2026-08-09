@@ -14,6 +14,24 @@ Format:
 
 ---
 
+## 2026-08-09 — Reverted the `@yme207` placeholder: it was the project owner's real handle all along
+**Decision:** `manifest.json`'s `codeowners`/`documentation`/`issue_tracker` now point at
+`@yme207`/`github.com/yme207/occupancy-tracker` again, and `README.md`'s "Installation" section has a
+concrete `git clone https://github.com/yme207/occupancy-tracker.git` instead of a URL-less "clone
+this repository."
+**Why:** Earlier this session's Phase 8 audit found `@yme207` in these fields and assessed it as "a
+previous *real-looking* but wrong GitHub handle," swapping in a `TODO-set-your-github-username`
+placeholder on the assumption the project owner hadn't set up a real repo yet. That assumption was
+never actually verified against anything — it was inferred from the handle simply looking unfamiliar/
+unrelated. Running `git remote -v` while pushing this session's other work showed `origin` already
+set to exactly that repo, already synced, with prior real commits authored by the project owner —
+who then directly confirmed it's their actual GitHub identity. The original find wasn't a bug at all.
+**Alternatives considered:** None — this is a straight revert of an overcorrection, not a new design
+choice. The general lesson (recorded here rather than left implicit): an identifier "looking
+unfamiliar" is not evidence it's wrong — for anything with a real, checkable source of truth nearby
+(here, `git remote -v`, sitting one command away), check it before overwriting real user data with a
+placeholder, the same standard this project already holds itself to for HA APIs.
+
 ## 2026-08-09 — Removed the synthetic "Outside" graph node and its edges entirely
 **Decision:** The topology panel no longer draws a shared "Outside" node or the dashed edges
 connecting every access-point Area to it. Access points are shown purely via the existing per-node

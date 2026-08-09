@@ -704,22 +704,17 @@ but nothing in the panel let a user populate it, so a real house had zero real s
 deleting it outright, since it explains why Phase 7 briefly showed as "done but not really usable"
 in two consecutive sessions' status text.
 
-## Open follow-up (action item, not blocking further phase work) — updated 2026-08-09
+## Resolved follow-up — manifest.json's GitHub-handle placeholder (was: 2026-08-09, fixed 2026-08-09)
 
-**`manifest.json`'s `codeowners`/`documentation`/`issue_tracker` are still a
-`TODO-set-your-github-username` placeholder** — but the assumption behind that placeholder has since
-been corrected. Earlier this session, `@yme207` (then present in these fields) was assessed as "a
-previous *real-looking* but wrong GitHub handle" and replaced with the placeholder, on the belief
-the project owner hadn't set up a real repo yet. When committing and pushing this session's work,
-`git remote -v` showed `origin` already pointing at `github.com/yme207/occupancy-tracker.git`, already
-synced, with 5+ prior real commits all authored by the project owner — **the project owner then
-directly confirmed `yme207` is in fact their real GitHub handle and this is their real repo.** So the
-original `@yme207` value wasn't stale after all; the placeholder swap was an overcorrection based on
-an unverified assumption. Still needs an explicit fix (put `@yme207`/the real repo URL back into
-`codeowners`/`documentation`/`issue_tracker`, and update `README.md`'s clone instructions to match) —
-not done automatically as part of this handoff since it touches attribution and felt worth a direct
-confirmation rather than assuming twice in a row. Revisit alongside `SPEC.md` §13 Q3 (HACS submission
-bar).
+**Previously:** `manifest.json`'s `codeowners`/`documentation`/`issue_tracker` were a
+`TODO-set-your-github-username` placeholder, on the belief that the `@yme207` handle they replaced
+was stale/wrong. **Now fixed**: pushing this session's work showed `origin` already pointing at
+`github.com/yme207/occupancy-tracker.git`, already synced, with prior real commits all authored by
+the project owner, who then directly confirmed `yme207` is in fact their real GitHub handle — the
+original placeholder swap was an overcorrection based on an unverified assumption, not a real find.
+`manifest.json`'s three fields now point at the real `@yme207`/`github.com/yme207/occupancy-tracker`,
+and `README.md`'s "Installation" section now has a concrete `git clone` command instead of an
+URL-less "clone this repository." Nothing left to revisit here before HACS submission.
 
 ## Next action
 
@@ -733,10 +728,7 @@ language/graph-simplification fixes) are now built, tested, and browser-verified
    a detail-panel open/close transition).
 2. `SPEC.md` §13 Q3's HACS submission bar decision (custom-repository-first vs. pursuing the HACS
    default-repository listing).
-3. The `manifest.json` `codeowners`/`documentation`/`issue_tracker` placeholder — **no longer blocked**
-   (the project owner confirmed `yme207`/this repo is real, see "Open follow-up" above), just needs
-   the actual edit plus a matching `README.md` update. Small, not yet done.
-4. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
+3. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
    fixtures — never tried yet, worth doing before calling Phase 8 done.
 
 The browser-verification loop this session (project owner testing → real bug found → fix → retest)
