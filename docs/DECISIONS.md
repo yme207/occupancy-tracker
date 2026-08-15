@@ -14,6 +14,27 @@ Format:
 
 ---
 
+## 2026-08-15 — MIT license added; CI's manifest key order and HACS repo-metadata gate resolved
+**Decision:** Added a root `LICENSE` file (MIT, copyright `yme207`), resolving `SPEC.md` §13 open
+question 3 in favor of a permissive license — the norm for HACS community integrations, with no
+reuse restrictions that would conflict with HACS distribution. Also reordered
+`custom_components/occupancy_tracker/manifest.json`'s keys to `domain`, `name`, then alphabetical
+(`codeowners`, `config_flow`, `dependencies`, `documentation`, `integration_type`, `iot_class`,
+`issue_tracker`, `single_config_entry`, `version`) — `issue_tracker` was previously placed before
+`integration_type`/`iot_class`, violating hassfest's required ordering.
+**Why:** The `hassfest` and `hacs` CI jobs were both red. `hassfest` failed outright on the manifest
+key ordering. The `hacs` job failed on two independent things: `check-repository` (missing
+description/topics — real GitHub repo settings, not files this repo controls, left for the project
+owner to set via the GitHub UI) and `check-license` (no `LICENSE` file — fixed here) plus a
+`check-manifest`/`integration_manifest` error ("expected a dictionary. Got None") whose likely cause,
+per a matching upstream report (`hacs/integration` issue #5252, "HACS manifest validation failing
+incorrectly"), is the same key-order defect crashing the hacs action's internal hassfest-equivalent
+call rather than an actual problem with `manifest.json`'s contents (which already contained every
+field HACS requires: `domain`, `documentation`, `issue_tracker`, `codeowners`, `name`, `version`) —
+expected to resolve alongside the ordering fix; confirm on the next CI run before assuming otherwise.
+**Alternatives considered:** Apache-2.0 — considered, but MIT is more standard for this integration's
+category and audience; the project owner chose MIT directly.
+
 ## 2026-08-15 — `_plausible_transit_source` now searches multi-hop, nearest-candidate-first, through empty Areas
 **Decision:** `occupancy_engine.py`'s `_plausible_transit_source` no longer only checks an Area's
 *direct* Connector-adjacent neighbors. It now does a breadth-first search outward through any chain of

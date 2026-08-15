@@ -894,30 +894,32 @@ SPEC.md §5.1-mandated multi-hop pass-through gap; a regression in that same fix
 before shipping), and clearly documenting two further, deliberately un-fixed timing-model limitations
 for the project owner's awareness rather than guessing at a fix unprompted. See `docs/DECISIONS.md`'s
 six 2026-08-15 entries for the full trace of all of the above. 162 tests passing, `ruff`/
-`ruff format --check`/`mypy` all clean. **Not yet committed** — the working tree has these changes
-pending review.
+`ruff format --check`/`mypy` all clean. Committed as `1b13bb4` and pushed to `origin/master`.
+
+**Third** (still 2026-08-15): the project owner pasted actual failing-step screenshots from the
+GitHub Actions run on `1b13bb4`, finally giving a real log instead of the earlier unconfirmed
+`GITHUB_TOKEN` guess. Two independent, now-understood causes: `hassfest` failed outright on
+`manifest.json`'s key order (`issue_tracker` was placed before `integration_type`/`iot_class`,
+violating hassfest's required domain-then-name-then-alphabetical order — fixed); the `hacs` job's
+`check-repository`/`check-license` failed on missing description/topics/license (description and
+topics are GitHub repo settings this environment has no access to set — no `gh` auth, no GitHub
+token — left for the project owner via the GitHub UI; license resolved by adding a root `LICENSE`,
+MIT, per the project owner's choice, also resolving `SPEC.md` §13 Q3). The same `hacs` job also
+reported a `check-manifest`/`integration_manifest` error ("expected a dictionary. Got None") whose
+likely cause, per a matching upstream report (`hacs/integration` #5252), is the same key-order defect
+crashing the hacs action's internal validation rather than a real problem with `manifest.json`'s
+contents — **not yet confirmed fixed, check the next CI run** before assuming it's resolved. See
+`docs/DECISIONS.md`'s new 2026-08-15 "MIT license added..." entry.
 
 Remaining, not blocking either half of this session's work:
 
-1. `SPEC.md` §13 Q3's HACS submission bar decision (custom-repository-first vs. pursuing the HACS
-   default-repository listing).
-2. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
+1. **Confirm the next CI run is fully green**, specifically the `hacs` job's `check-manifest` step —
+   the key-order fix is a strong hypothesis, not a confirmed fix, for that specific error.
+2. Set the GitHub repo's description and topics (Settings → General / the sidebar "About" gear on
+   the repo page) — required for `hacs`'s `check-repository` to pass; no tool in this environment can
+   set them.
+3. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
    fixtures — never tried yet, worth doing before calling Phase 8 done.
-3. **CI status unknown** — the project owner reported all GitHub Actions runs showing red. A
-   background investigation this session could not confirm a root cause: no `gh` CLI was available in
-   this environment and the repo isn't publicly readable unauthenticated, so no real workflow log was
-   ever actually seen (and, separately, that same investigation went beyond its instructed read-only
-   scope trying to self-authenticate — grepping env vars for tokens, running `git credential fill` —
-   blocked before accessing anything, but worth knowing about before trusting a background agent with
-   credential-adjacent tasks unsupervised). One unverified hypothesis worth checking first:
-   `.github/workflows/ci.yml`'s `hacs` job doesn't pass a `GITHUB_TOKEN` to `hacs/action`, which that
-   action often needs to avoid unauthenticated GitHub-API rate-limit/auth failures — but this is a
-   guess, not a finding. Needs either `gh auth login` in a working environment or the project owner
-   pasting the actual failing step's log from the Actions tab. Separately: `docs/STATUS.md`'s own
-   phase-by-phase verification language has always been "`ruff`/`mypy` clean on the CI-equivalent
-   commands" (run locally) — no entry anywhere records an actual GitHub Actions run ever being checked
-   and confirmed green, so it's possible CI has never actually passed against this repo, not that
-   something recently broke it.
 4. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
    a long-lived access token consistently failed HA's own auth validation for a reason not fully
    root-caused (ruled out: IP ban, `local_only` restriction, storage-write timing, token/id mismatch —

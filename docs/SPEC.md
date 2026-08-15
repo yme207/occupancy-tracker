@@ -431,7 +431,11 @@ Still open — product/design-level, none block Phase 0–3:
    or a later addition? (before Phase 8)
 3. **HACS submission bar** — are we building toward the full HACS default-repository review
    (code owners, brand assets, quality scale) from the start, or shipping as a custom-repository
-   HACS install first and formalizing later? (before Phase 8)
+   HACS install first and formalizing later? (before Phase 8) **Partially resolved 2026-08-15:**
+   license chosen (MIT, root `LICENSE` added — required by `hacs`'s `check-license` regardless of
+   which path this resolves to). The broader default-repository-vs-custom-repository question is
+   still open; brand-assets submission remains explicitly skipped (`ignore: brands` in CI, see
+   `docs/DECISIONS.md` 2026-08-08).
 
 ## 14. Glossary
 
