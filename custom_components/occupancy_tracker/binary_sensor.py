@@ -89,6 +89,21 @@ class PreArmedBinarySensor(BinarySensorEntity):
         # __init__.py registers (its `configuration_url` is what gives the
         # integration's own Settings page a link back to the topology panel).
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)})
+        # Without an explicit entity_id, HA's entity_platform.py routes the
+        # suggested name through entity_registry's `object_id_base` rather
+        # than `suggested_object_id` — and only the latter is documented (and
+        # actually, verified from entity_registry.py's
+        # _async_get_full_entity_name) to skip joining the *device's* name
+        # onto the object id. Since this entity has _attr_device_info set
+        # (for the Settings-page grouping above) but no explicit
+        # has_entity_name=True naming scheme, that join silently produced
+        # `binary_sensor.occupancy_tracker_pre_armed` instead of the stable
+        # `binary_sensor.pre_armed` this integration (and its tests) expect —
+        # setting entity_id directly is the sanctioned way to pin the
+        # suggested object id regardless of device grouping (verified: see
+        # entity_platform.py's EntityPlatform._async_add_entity comment "An
+        # entity may suggest the entity_id by setting entity_id itself").
+        self.entity_id = "binary_sensor.pre_armed"
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(self._zone_fusion.add_listener(self._handle_zone_update))

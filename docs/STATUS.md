@@ -555,6 +555,80 @@ Work bottom-up: engine logic before HA glue, HA glue before the frontend that de
         and near-house-zone flows: `input_boolean.kitchen_door` and
         `input_boolean.entrance_hallway_door`, assigned to their Areas the same way the existing
         motion/light fixtures are.
+      - **Two of the three remaining `docs/UX_GUIDELINES.md` §6/§7 review items now built** (light/
+        dark theme contrast + the noted setup-friction/motion UX ideas from the audit — see
+        `docs/DECISIONS.md`'s 2026-08-15 entries for the full reasoning on each):
+        - The three quality chips (Confirmed/Probably occupied/Checking…) were re-verified against
+          the real color values in the installed `home-assistant-frontend` bundle (not guessed) and
+          found to fail WCAG contrast — worst in dark theme, where the "Probably occupied" chip's
+          white-on-`--secondary-text-color` background was nearly invisible (~1.6:1). Redesigned as
+          a neutral pill with a small color dot instead of a solid colored pill with white text.
+        - A room with no activity-evidence entities selected yet, but a `binary_sensor` or
+          `input_boolean` entity that's plausibly a motion sensor, now shows a one-click "Use it"
+          suggestion inline — setup-friction relief from the audit's noted-not-yet-built list.
+          Matches on `device_class` (`motion`/`occupancy`/`presence`) where available, falling back to
+          a name match ("motion"/"occupancy"/"presence" as an underscore/edge-delimited token in the
+          object id) since `device_class` doesn't exist on `input_boolean` at all — needed because this
+          project's own dev-instance fixtures simulate motion sensors with toggleable `input_boolean`
+          helpers rather than real (untoggleable-without-hardware) `binary_sensor` entities, and
+          real-world motion `binary_sensor`s don't always set `device_class` either. Deliberately a
+          one-click accept, not a silent auto-apply: `area_entity_selections` can't distinguish "never
+          configured" from "user explicitly cleared it" (both are an absent key), so auto-applying
+          would risk silently undoing a deliberate choice.
+        - The room detail panel now fades/slides in and out (180ms, respects
+          `prefers-reduced-motion`) instead of appearing/disappearing instantly.
+        **Browser-verified by the project owner**, after two more real bugs the live-testing loop
+        caught (this session had no browser/screenshot tool of its own — the project owner tested every
+        round in their own browser and reported back, same loop as prior sessions' live-testing rounds):
+        1. **The suggestion never appeared at all, even after the redesign looked correct on
+           inspection.** Root cause: the name-match regex was written as `/\bmotion\b/i`, which never
+           actually matches — JavaScript's `\b` treats `_` as a word character, so there's no boundary
+           between "landing" and "motion" in `landing_motion`, the entity-id format virtually every HA
+           entity uses. Silently broken for every real entity, not just this dev instance's fixtures.
+           Fixed with explicit `_`/start/end anchoring (`/(?:^|_)(?:motion|occupancy|presence)(?:_|$)/i`)
+           and actually tested against real cases this time (including a would-be false positive like
+           "emotion") rather than reasoned about — see `docs/DECISIONS.md`.
+        2. **A separate, real fix still worth keeping even though it wasn't the day's actual blocker**:
+           `panel.py`'s static path serving defaults to aggressive, long-lived browser caching
+           (`cache_headers=True`, HA's default — verified from source), and the frontend is itself a
+           PWA with a service worker, so a plain hard-refresh during dev iteration (or a real user's
+           browser after a HACS update) isn't guaranteed to fetch a changed `topology-panel.js` at all.
+           `panel.py` now appends a cache-busting `?v=<mtime>` query string to the panel's `module_url`,
+           computed once per HA-process lifetime (registration is a startup-once operation) — so this
+           still requires an HA restart to take effect (both for a genuine JS change to be reflected in
+           a previously-visited browser, and because of the existing "restart after any Python change"
+           rule this file itself is one), not a substitute for it. See "Local dev Home Assistant
+           instance" below for the now-documented caveat.
+        Once both were fixed and the instance restarted, every item above was confirmed working live:
+        the chip's dot+neutral-pill contrast, the detail-panel transition, and — after finding the two
+        bugs above — the "Use it" suggestion actually applying and un-dimming the room.
+      - **Two real, pre-existing bugs found and fixed while re-verifying the full test suite** (not
+        related to the UX work above — surfaced because the full suite was actually re-run, which
+        turned out not to have happened cleanly in a while; see `docs/DECISIONS.md`'s two 2026-08-15
+        entries for the full trace):
+        1. The Phase 8 device-grouping feature (`_attr_device_info` on the two house-level entities)
+           had an undiscovered side effect for any **brand-new** install: HA's entity-id generation
+           silently joined the device's name in, producing `sensor.occupancy_tracker_total_occupant_count`
+           instead of the documented `sensor.total_occupant_count` (same for `binary_sensor.pre_armed`).
+           Root-caused by tracing the installed `homeassistant` 2026.8.1 source (not guessed), fixed by
+           explicitly setting `entity_id` in both entities' `__init__` — the sanctioned HA mechanism
+           for pinning a suggested object id regardless of device grouping. This project's own dev
+           instance was never actually affected (its entities predate the device-grouping change, and
+           HA doesn't rename an existing entity's id on reload) — but a fresh HACS install today would
+           have been, silently breaking anyone's dashboards/automations built against the documented
+           entity_id.
+        2. Three tests (`test_setup_entry_skips_entities_for_untracked_areas`,
+           `test_reload_removes_entities_for_areas_deselected_entirely`,
+           `test_set_occupant_count_overrides_area_sensor`) faked a topology-selected entity via a bare
+           `hass.states.async_set(...)` instead of registering it in the entity registry with an
+           `area_id` — `RegistrySync` builds its house shape purely from the entity registry, so
+           `TopologyStore.reconcile()` correctly stripped the fake selection every time, and the
+           assertions failed. Fixed to match the registration pattern every other test in the suite
+           already used. This directly contradicts this same Phase 8 entry's own earlier claim (see
+           above) that these exact three `test_init.py` tests were added and verified "clean" — that
+           claim did not hold up against actually re-running the suite this session. 149 tests passing
+           (net: 6 fixed, no new tests added — these were fixes to existing coverage), `ruff`/
+           `ruff format --check`/`mypy` all clean.
       - **The synthetic "Outside" graph node and its converging dashed edges were removed entirely**,
         per project-owner feedback (with screenshots) that a house with more than one or two access
         points produced messy crossing lines to one arbitrarily-positioned shared node, and it didn't
@@ -563,6 +637,81 @@ Work bottom-up: engine logic before HA glue, HA glue before the frontend that de
         concept is unaffected (it was always derived independently from `egress_points`, never from
         this UI node). See `docs/DECISIONS.md` for the full reasoning and what was and wasn't touched
         on the backend (nothing — the save schema's `outside_position` field already accepted `null`).
+
+## Algorithm scenario-testing harness (2026-08-15) — new, not a Phase 8 item
+
+A new capability, prompted directly by the project owner: rather than driving the live dev HA instance
+by hand (or via API access to it, which turned out to be a real dead end this session — a
+seemingly-valid long-lived access token consistently failed HA's own signature validation for reasons
+not fully root-caused, even after ruling out an IP ban and the `local_only` restriction via real source-
+reading; not worth chasing further given the better alternative below), `tests/test_engine_scenarios_realhouse.py`
+scripts known-ground-truth walkthroughs directly against the pure-Python `OccupancyEngine`
+(`docs/ARCHITECTURE.md`'s deliberate zero-HA-dependency design, `docs/TESTING.md` layer 1) — exact,
+controlled timestamps, no network/auth/timing flakiness, runs in under 2 seconds. The house shape used
+(`real_house_graph()`) mirrors the project owner's actual dev-instance topology connector-for-connector
+(11 Areas, 10 Connectors, the 2 real egress points), not a minimal toy fixture, so scenarios exercise
+the same adjacency complexity a real house has — hardcoded rather than loaded from the live `.storage`
+file, since the point is a portable, committable regression scenario, not a snapshot tied to one
+machine.
+
+**A real, previously-undiscovered occupancy-counting bug was found and fixed this way**, not by
+inspection — see `docs/DECISIONS.md`'s "Egress-arrival confirmation now prefers a freshly-active
+interior neighbor over OUTSIDE" entry for the full trace: a single person triggering `front_yard`'s
+motion sensor a few seconds before opening the front door was being counted as **two** people
+(`front_yard` stranded at 1 forever, the door's own arrival unconditionally counted as a second, new
+occupant). Fixed in `occupancy_engine.py`'s `_confirm_transit`, verified against both the bug scenario
+and two adversarial guard-rail scenarios (an unrelated, timing-distant neighbor must *not* get merged;
+two simultaneously-plausible neighbors must stay ambiguous, not guessed) — all passing, plus two more
+complex realistic scenarios (a third arrival not disturbing two already-known occupants elsewhere in
+the house; a walk through the 5-way `landing` junction leaving no residual "ghost" occupant) that
+already worked correctly, a useful confirmation rather than a null result. 6 new tests, 155 total.
+`ruff`/`ruff format --check`/`mypy`/full `pytest` all clean.
+
+**Extended the same session, at the project owner's explicit direction, with five more scenario
+categories** — unsensored/pass-through rooms, overnight sleeping, the house emptying completely, and a
+known-N-simultaneous-occupants stress test with tight/coincidental timing — surfacing two more real,
+previously-undiscovered gaps (see `docs/DECISIONS.md`'s "`_plausible_transit_source` now searches
+multi-hop, nearest-candidate-first" entry for the full trace):
+- `SPEC.md` §5.1 explicitly requires an unsensored Area to work as a transparent pass-through node
+  connecting two sensored rooms — the *existing* algorithm (even after the egress-arrival fix above)
+  actually couldn't do this at all beyond one direct hop, since `_plausible_transit_source` only ever
+  checked an Area's immediate neighbors. Fixed with a breadth-first, nearest-candidate-first search that
+  treats a chain of currently-empty Areas as transparent, without letting an implausible-but-coincidentally
+  time-plausible *farther* candidate ever outrank a real, close one (an unbounded first version of this
+  fix had exactly that regression, caught by its own scenario before shipping).
+- A related, deliberately **un-fixed** finding, documented rather than patched: ordinary sensor noise
+  (someone shifting in their chair, re-triggering an already-on motion sensor with no actual movement)
+  can create a spurious tie against a genuinely different, unrelated transit happening nearby at the same
+  moment, falling back to the same pre-existing "ambiguous, don't guess" behavior — not a new failure
+  mode, but a newly-characterized way to trigger it that the existing tests didn't previously probe for.
+  A real fix would need tracking more state per Area (a separate "became newly occupied at" timestamp,
+  distinct from "last confirmed at") — a genuine complexity/design trade-off for the project owner to
+  weigh, not something to guess at unprompted.
+- A second, similarly-documented-not-fixed limitation: a "cold" wake-up motion event many hours after
+  the last evidence (no intermediate stirring signal) can't be attributed back to its true source either,
+  for the same reason (a multi-hour gap is far outside any realistic `transit_confirmation_window`) —
+  same underlying trade-off, different trigger.
+
+Also fixed two bugs in the **test harness itself**, found while building these: `run_scenario()` runs an
+entire move list to completion before returning, so checking `counts()` against an "earlier" timestamp
+after the full list had already been applied was silently asserting against the *final* state, not an
+honest mid-scenario snapshot (`occupant_count` has no notion of "as of an earlier time," only `quality`
+reads `now`) — fixed by adding `apply_moves()` for genuinely staged, checkpoint-by-checkpoint scenarios.
+Separately, several of the new scenarios' first-draft timings exceeded the default 90-second
+`transit_confirmation_window` between hops, which produces entirely different (and entirely correct,
+given that config) engine behavior than the scenario intended to test — a reminder that a scripted
+scenario's *timing*, not just its topology, has to be deliberately chosen relative to whatever
+`EngineConfig` it runs under.
+
+13 scenario tests total (7 new this round), 162 project tests total. `ruff`/`ruff format --check`/
+`mypy`/full `pytest` all clean.
+
+This harness is a reusable capability for future sessions, not a one-off: extend
+`tests/test_engine_scenarios_realhouse.py` with more scripted scenarios (the `Move`/`apply_moves`/
+`run_scenario`/`counts`/`qualities` helpers are generic) whenever a specific transit-inference behavior
+needs probing or a suspected edge case needs confirming before deciding whether to change the algorithm
+— and when writing checkpoint-style assertions, use `apply_moves` in stages, not `run_scenario` checked
+retroactively.
 
 ## Open questions blocking specific phases
 
@@ -613,6 +762,18 @@ test venv:
   drag-to-reposition silently failed to persist because the running process was still executing the
   pre-`area_positions` backend). There's no auto-reload for backend code the way there is for the
   frontend JS.
+- **⚠️ A plain browser reload (even a "hard" one) is not reliably enough to see a `topology-panel.js`
+  change** — this cost real time on 2026-08-15 (see `docs/DECISIONS.md`'s entry of the same date) and
+  is recorded here so it isn't rediscovered from scratch: HA's static-path serving defaults to
+  aggressive, long-lived caching (`cache_headers=True`), and the HA frontend is itself a PWA with a
+  service worker — neither is guaranteed to be bypassed by Ctrl+Shift+R alone. `panel.py` now appends
+  a cache-busting `?v=<mtime>` query string to the panel's script URL, but that value is only
+  recomputed on an HA **process restart** (panel registration is a startup-once operation, guarded by
+  its own `hass.data` sentinel), so a JS-only edit still needs a restart to actually get a new,
+  guaranteed-uncached URL — this narrows (but doesn't fully replace) the old "JS needs no restart"
+  convenience. **The reliable way to test a JS change is a fresh private/incognito window** (no
+  pre-existing service worker or cache for that origin) after restarting HA, not just reloading an
+  already-open tab.
 - **configuration.yaml is deliberately minimal** (`frontend:`, `config:`, `person:` — not
   `default_config:`). Reason: this WSL venv lives under a Windows path containing a space
   ("Occupancy Sensor"), which breaks HA's on-demand `uv`-based package installer (it splits the path
@@ -718,18 +879,53 @@ URL-less "clone this repository." Nothing left to revisit here before HACS submi
 
 ## Next action
 
-Both Phase 8 batches (requirements/UX audit fixes, then the live-testing-driven navigation/clutter/
-language/graph-simplification fixes) are now built, tested, and browser-verified end to end, and
-**committed and pushed** to `origin/master` (`github.com/yme207/occupancy-tracker`, commit
-`0934218`, 2026-08-09). Remaining before Phase 8 can be considered done:
+This session (2026-08-15) had two distinct halves. **First**: built the three noted-not-yet-built UX
+items (chip contrast, setup-friction entity suggestion, detail-panel transition), which surfaced —
+across a real project-owner browser-testing loop, not just inspection — four real bugs along the way:
+device-name-prefixed house-level entity ids on fresh installs, three tests faking an entity via bare
+state-set instead of real registration, a JS regex that never matched snake_case entity ids (`\b`
+doesn't split on `_`), and a browser-caching/service-worker issue masking the fix from ever being
+visible. All fixed and **browser-verified working by the project owner**. **Second**: at the project
+owner's direction, built a proper scenario-testing harness (see "Algorithm scenario-testing harness"
+above), then extended it through five more scenario categories (unsensored/pass-through rooms, overnight
+sleeping, the house fully emptying, known-N-simultaneous-occupants under tight/coincidental timing) —
+finding and fixing three real occupancy-counting bugs total (phantom-duplicated egress arrivals; a
+SPEC.md §5.1-mandated multi-hop pass-through gap; a regression in that same fix's first draft, caught
+before shipping), and clearly documenting two further, deliberately un-fixed timing-model limitations
+for the project owner's awareness rather than guessing at a fix unprompted. See `docs/DECISIONS.md`'s
+six 2026-08-15 entries for the full trace of all of the above. 162 tests passing, `ruff`/
+`ruff format --check`/`mypy` all clean. **Not yet committed** — the working tree has these changes
+pending review.
 
-1. The still-open `docs/UX_GUIDELINES.md` review items noted earlier (light/dark theme spot-checks on
-   the quality chips, the noted-but-not-built UX ideas: setup-friction relief for entity selection,
-   a detail-panel open/close transition).
-2. `SPEC.md` §13 Q3's HACS submission bar decision (custom-repository-first vs. pursuing the HACS
+Remaining, not blocking either half of this session's work:
+
+1. `SPEC.md` §13 Q3's HACS submission bar decision (custom-repository-first vs. pursuing the HACS
    default-repository listing).
-3. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
+2. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
    fixtures — never tried yet, worth doing before calling Phase 8 done.
+3. **CI status unknown** — the project owner reported all GitHub Actions runs showing red. A
+   background investigation this session could not confirm a root cause: no `gh` CLI was available in
+   this environment and the repo isn't publicly readable unauthenticated, so no real workflow log was
+   ever actually seen (and, separately, that same investigation went beyond its instructed read-only
+   scope trying to self-authenticate — grepping env vars for tokens, running `git credential fill` —
+   blocked before accessing anything, but worth knowing about before trusting a background agent with
+   credential-adjacent tasks unsupervised). One unverified hypothesis worth checking first:
+   `.github/workflows/ci.yml`'s `hacs` job doesn't pass a `GITHUB_TOKEN` to `hacs/action`, which that
+   action often needs to avoid unauthenticated GitHub-API rate-limit/auth failures — but this is a
+   guess, not a finding. Needs either `gh auth login` in a working environment or the project owner
+   pasting the actual failing step's log from the Actions tab. Separately: `docs/STATUS.md`'s own
+   phase-by-phase verification language has always been "`ruff`/`mypy` clean on the CI-equivalent
+   commands" (run locally) — no entry anywhere records an actual GitHub Actions run ever being checked
+   and confirmed green, so it's possible CI has never actually passed against this repo, not that
+   something recently broke it.
+4. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
+   a long-lived access token consistently failed HA's own auth validation for a reason not fully
+   root-caused (ruled out: IP ban, `local_only` restriction, storage-write timing, token/id mismatch —
+   all checked against real source or real storage, not guessed). Not pursued further because the
+   scenario-testing harness above turned out to be the better tool for the actual goal (robust,
+   repeatable algorithm testing) anyway — but if a future session specifically needs live HA
+   entity-triggering (e.g. to test `signal_ingestion.py`'s own wiring, not just the engine), this would
+   need a fresh diagnosis attempt.
 
 The browser-verification loop this session (project owner testing → real bug found → fix → retest)
 worked well through six slices in a row now and is worth continuing — see "Local dev Home Assistant

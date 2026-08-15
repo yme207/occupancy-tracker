@@ -80,7 +80,10 @@ async def test_setup_entry_creates_house_level_entities_regardless(
 
 
 async def test_setup_entry_skips_entities_for_untracked_areas(
-    hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    entity_registry: er.EntityRegistry,
+    enable_custom_integrations: None,
 ) -> None:
     """A room with nothing selected (no activity evidence, not an access
     point) is one the user hasn't opted into tracking — project-owner
@@ -98,10 +101,18 @@ async def test_setup_entry_skips_entities_for_untracked_areas(
     assert hass.states.get("sensor.kitchen_occupant_count") is None
     assert hass.states.get("binary_sensor.kitchen_occupied") is None
 
-    motion_entry_id = "binary_sensor.kitchen_motion"
-    hass.states.async_set(motion_entry_id, "off")
+    # RegistrySync's house shape (registry_sync.py's _build_house_shape) is
+    # built purely from the entity registry, not from bare states — an
+    # entity has to actually be registered with this Area to be a valid
+    # activity-evidence selection, matching how a real HA-known entity would
+    # get here (see test_entities.py's identical registration pattern).
+    motion_entry = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "kitchen-motion-unique-id", suggested_object_id="kitchen_motion"
+    )
+    entity_registry.async_update_entity(motion_entry.entity_id, area_id=kitchen.id)
+    hass.states.async_set(motion_entry.entity_id, "off")
     await entry.runtime_data.topology_store.async_save(
-        TopologyData(area_entity_selections={kitchen.id: (motion_entry_id,)})
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry.entity_id,)})
     )
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
@@ -111,7 +122,10 @@ async def test_setup_entry_skips_entities_for_untracked_areas(
 
 
 async def test_reload_removes_entities_for_areas_deselected_entirely(
-    hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    entity_registry: er.EntityRegistry,
+    enable_custom_integrations: None,
 ) -> None:
     """Deselecting a room's last piece of evidence should remove its
     now-stale entities, not leave them registered-but-unavailable forever.
@@ -122,10 +136,13 @@ async def test_reload_removes_entities_for_areas_deselected_entirely(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    motion_entry_id = "binary_sensor.kitchen_motion"
-    hass.states.async_set(motion_entry_id, "off")
+    motion_entry = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "kitchen-motion-unique-id", suggested_object_id="kitchen_motion"
+    )
+    entity_registry.async_update_entity(motion_entry.entity_id, area_id=kitchen.id)
+    hass.states.async_set(motion_entry.entity_id, "off")
     await entry.runtime_data.topology_store.async_save(
-        TopologyData(area_entity_selections={kitchen.id: (motion_entry_id,)})
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry.entity_id,)})
     )
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()

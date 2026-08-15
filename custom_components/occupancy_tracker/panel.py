@@ -56,11 +56,28 @@ async def async_setup(hass: HomeAssistant) -> None:
     www_path = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths([StaticPathConfig(_STATIC_URL_PATH, str(www_path))])
 
+    # HA's static-path serving defaults to cache_headers=True (verified:
+    # homeassistant/components/http/server.py's StaticPathConfig), which
+    # sends long-lived, aggressive caching headers — sensible for
+    # hash-named production assets, but this file's URL never changes on its
+    # own. Without a cache-busting query string, a browser that already
+    # loaded this panel once can keep serving a stale copy indefinitely
+    # across normal reloads, silently hiding any update (during local dev
+    # iteration, and for a real end user's browser after a HACS update).
+    # Keying it to the file's own mtime — rather than manifest.json's
+    # `version`, which requires remembering to bump it on every change —
+    # means any actual edit is automatically reflected, no discipline
+    # required, verified via the panel_custom source: `module_url` is passed
+    # through to the frontend's panel config untouched, so a query string on
+    # it is safe.
+    panel_module_path = www_path / _PANEL_MODULE
+    cache_bust = int(panel_module_path.stat().st_mtime)
+
     await async_register_panel(
         hass,
         frontend_url_path=DOMAIN,
         webcomponent_name=_WEBCOMPONENT_NAME,
-        module_url=f"{_STATIC_URL_PATH}/{_PANEL_MODULE}",
+        module_url=f"{_STATIC_URL_PATH}/{_PANEL_MODULE}?v={cache_bust}",
         sidebar_title="Occupancy Tracker",
         sidebar_icon="mdi:home-search",
         require_admin=True,

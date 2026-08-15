@@ -95,6 +95,13 @@ class TotalOccupantCountSensor(_EngineBoundSensor):
         # __init__.py registers (its `configuration_url` is what gives the
         # integration's own Settings page a link back to the topology panel).
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)})
+        # See binary_sensor.py's PreArmedBinarySensor for the full verified
+        # explanation: without this, HA's entity_id generation silently
+        # joins the device's name onto the object id whenever
+        # _attr_device_info is set (regardless of has_entity_name), yielding
+        # `sensor.occupancy_tracker_total_occupant_count` instead of the
+        # stable `sensor.total_occupant_count` this integration expects.
+        self.entity_id = "sensor.total_occupant_count"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

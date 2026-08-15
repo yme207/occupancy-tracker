@@ -350,28 +350,65 @@ class OccupancyEngine:
         self._last_provenance[area_id] = signal.provenance
 
     def _plausible_transit_source(self, area_id: str, now: datetime) -> str | None:
-        """The one Connector-adjacent occupied Area whose last evidence is
-        close enough in time to `now` to plausibly be the same person
-        arriving on foot — not so close it would require teleporting (they
-        can't — a gap under `min_transit_time` means it's a second, distinct
-        occupant instead), not so long ago it's more likely unrelated (see
+        """The one reachable occupied Area whose last evidence is close
+        enough in time to `now` to plausibly be the same person arriving on
+        foot — not so close it would require teleporting (they can't — a gap
+        under `min_transit_time` means it's a second, distinct occupant
+        instead), not so long ago it's more likely unrelated (see
         docs/DECISIONS.md).
+
+        "Reachable" walks through any chain of currently-*empty* adjacent
+        Areas transparently (SPEC.md §5.1: "an Area with zero devices/
+        entities is still a valid graph node... e.g. a hallway with no
+        sensors at all, connecting two sensored rooms" — an empty Area here
+        isn't necessarily literally sensor-less, just currently unconfirmed,
+        but the effect needed is the same either way: it must not block the
+        search for a real, occupied source just because it's the empty
+        Area in between).
+
+        Breadth-first, nearest candidates only: a real 1-hop neighbor is
+        always at least as plausible as some other occupied Area three empty
+        rooms away that merely *also* happens to fall inside the same flat
+        `transit_confirmation_window` — walking further genuinely takes more
+        time, so a closer candidate should never lose out to a coincidentally
+        time-plausible farther one. Once any candidate is found at a given
+        distance, farther distances are never even considered; ambiguity
+        (returning `None`) only applies among ties at that same, nearest
+        distance — found via a real scripted scenario where a farther Area
+        reachable through an unrelated unoccupied chain otherwise polluted a
+        much more obviously correct 1-hop match (see docs/DECISIONS.md).
         """
-        candidates: set[str] = set()
-        for connector in self._graph.connectors:
-            if not connector.touches(area_id):
-                continue
-            other = connector.other_side(area_id)
-            if other == OUTSIDE or self._counts.get(other, 0) <= 0:
-                continue
-            last_confirmed = self._last_confirmed.get(other)
-            if last_confirmed is None:
-                continue
-            gap = now - last_confirmed
-            if self._config.min_transit_time <= gap <= self._config.transit_confirmation_window:
-                candidates.add(other)
-        if len(candidates) == 1:
-            return next(iter(candidates))
+        visited = {area_id}
+        frontier = {area_id}
+        while frontier:
+            candidates: set[str] = set()
+            next_frontier: set[str] = set()
+            for current in frontier:
+                for connector in self._graph.connectors:
+                    if not connector.touches(current):
+                        continue
+                    other = connector.other_side(current)
+                    if other == OUTSIDE or other in visited:
+                        continue
+                    visited.add(other)
+                    if self._counts.get(other, 0) <= 0:
+                        # Empty — not a candidate itself, but keep looking
+                        # further out along this chain if nothing closer pans out.
+                        next_frontier.add(other)
+                        continue
+                    last_confirmed = self._last_confirmed.get(other)
+                    if last_confirmed is None:
+                        continue
+                    gap = now - last_confirmed
+                    if (
+                        self._config.min_transit_time
+                        <= gap
+                        <= self._config.transit_confirmation_window
+                    ):
+                        candidates.add(other)
+            if candidates:
+                return next(iter(candidates)) if len(candidates) == 1 else None
+            frontier = next_frontier
         return None
 
     def _handle_connector_activity(self, signal: ConnectorActivitySignal) -> None:
@@ -436,7 +473,29 @@ class OccupancyEngine:
     def _confirm_transit(
         self, pending: _PendingTransit, now: datetime, provenance: ProvenanceTier
     ) -> None:
-        if pending.source_area_id != OUTSIDE and self._counts[pending.source_area_id] <= 0:
+        source = pending.source_area_id
+        if source == OUTSIDE:
+            # An egress-point arrival's source is always modeled as OUTSIDE
+            # by the connector itself, since only the door sensor fired —
+            # but a Connector-adjacent interior Area that was *also* freshly
+            # occupied (e.g. a front-yard motion sensor tripping on the walk
+            # up to the door, a few seconds before the door itself) is a
+            # more plausible true source than a brand-new arrival: without
+            # this check, that Area's occupant is left stranded there
+            # forever, phantom-duplicating the same person as both "still in
+            # the yard" and "a new arrival" (found via a real scripted
+            # walkthrough scenario against the actual house topology, not
+            # theorized — see docs/DECISIONS.md). Reuses the same
+            # timing+adjacency heuristic the sensor-less-connector path
+            # already relies on everywhere else, rather than inventing a
+            # second one — if more than one neighbor is plausible, it stays
+            # ambiguous and falls back to OUTSIDE, same as that path's own
+            # "can't resolve a direction" behavior.
+            alt_source = self._plausible_transit_source(pending.dest_area_id, now)
+            if alt_source is not None:
+                source = alt_source
+
+        if source != OUTSIDE and self._counts[source] <= 0:
             # The source was already drained by a different confirmed
             # transit while this one was pending (two Connectors both
             # inferring the same Area as source) — the original inference no
@@ -446,10 +505,10 @@ class OccupancyEngine:
             del self._pending[pending.connector_id]
             return
 
-        if pending.source_area_id != OUTSIDE:
-            self._counts[pending.source_area_id] -= 1
-            self._last_confirmed[pending.source_area_id] = now
-            self._last_provenance[pending.source_area_id] = provenance
+        if source != OUTSIDE:
+            self._counts[source] -= 1
+            self._last_confirmed[source] = now
+            self._last_provenance[source] = provenance
         self._counts[pending.dest_area_id] += 1
         self._last_confirmed[pending.dest_area_id] = now
         self._last_provenance[pending.dest_area_id] = provenance

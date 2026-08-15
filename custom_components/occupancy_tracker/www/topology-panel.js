@@ -43,6 +43,36 @@ const PROVENANCE_LABELS = {
   AMBIGUOUS_PHYSICAL: "a sensor picking up activity",
 };
 
+// binary_sensor device classes that mean "someone is physically here" (HA's
+// own device-class list — verified against developers.home-assistant.io's
+// binary_sensor entry, not guessed) — used to suggest likely occupancy
+// evidence per room (docs/UX_GUIDELINES.md §3's "confident, sensible
+// defaults"). Deliberately excludes weaker/ambiguous classes like "moving"
+// (that's for the device itself moving, e.g. a vehicle, not room presence).
+const OCCUPANCY_EVIDENCE_DEVICE_CLASSES = new Set(["motion", "occupancy", "presence"]);
+
+// device_class only exists on binary_sensor, and even there a real-world
+// motion sensor integration doesn't always set it — and this project's own
+// dev-instance fixtures (docs/STATUS.md) use input_boolean helpers to
+// simulate a motion sensor precisely *because* input_boolean is toggleable
+// from the UI, unlike a real binary_sensor. Neither has a device_class, so a
+// name fallback is needed for the suggestion to ever fire for them: a
+// whole-word match on the object id, restricted to these two domains (the
+// only ones signal_ingestion.py-relevant "on/off occupancy signal" domains
+// this heuristic should guess at — a numeric sensor.*_motion_battery or a
+// switch.*_motion_override would be a false positive under a looser check).
+const OCCUPANCY_EVIDENCE_ENTITY_DOMAINS = new Set(["binary_sensor", "input_boolean"]);
+// Not \b-based: JavaScript regex treats "_" as a word character, so \b never
+// breaks between "landing" and "motion" in "landing_motion" — the entity
+// object id format virtually every HA entity actually uses — which silently
+// never matched anything. Anchoring on "_"/start/end explicitly instead.
+const OCCUPANCY_EVIDENCE_NAME_PATTERN = /(?:^|_)(?:motion|occupancy|presence)(?:_|$)/i;
+
+// Must match the setTimeout delay in _selectArea's closing branch — the
+// detail card stays mounted this long after deselection so its CSS
+// transition can actually finish playing before Lit removes it from the DOM.
+const DETAIL_TRANSITION_MS = 180;
+
 // crypto.randomUUID() requires a secure context (https or localhost) and is
 // unavailable on a plain-http LAN address — exactly how this project's own
 // dev HA instance is reached (docs/STATUS.md), and a common way real HA
@@ -91,6 +121,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     _connectPreviewPoint: { state: true },
     _selectedConnectorId: { state: true },
     _engineState: { state: true },
+    _detailPhase: { state: true },
   };
 
   constructor() {
@@ -118,6 +149,10 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     // directly, it's just a handle for cleanup.
     this._engineState = null;
     this._engineStateUnsub = null;
+    // Drives the detail card's open/close CSS transition
+    // (docs/UX_GUIDELINES.md §2) — see _selectArea for the state machine.
+    this._detailPhase = "closed";
+    this._detailCloseTimer = null;
     this._onKeyDown = this._onKeyDown.bind(this);
   }
 
@@ -130,6 +165,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     window.removeEventListener("keydown", this._onKeyDown);
     this._engineStateUnsub?.();
     this._engineStateUnsub = null;
+    if (this._detailCloseTimer) clearTimeout(this._detailCloseTimer);
     super.disconnectedCallback();
   }
 
@@ -538,8 +574,55 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     window.addEventListener("pointerup", onUp);
   }
 
+  // Detail-card open/close is a small state machine, not a plain boolean,
+  // so the closing transition has a frame to actually play: Lit removes the
+  // card from the DOM the instant _selectedAreaId goes falsy, which would
+  // otherwise skip the CSS transition entirely (no time to animate an
+  // element that's already gone). "entering" needs its own extra rAF too —
+  // committing "entering" and "open" styles in the same paint would collapse
+  // them into one frame with nothing to transition from.
   _selectArea(areaId) {
-    this._selectedAreaId = areaId;
+    if (areaId === this._selectedAreaId) return;
+    if (this._detailCloseTimer) {
+      clearTimeout(this._detailCloseTimer);
+      this._detailCloseTimer = null;
+    }
+    if (areaId) {
+      this._selectedAreaId = areaId;
+      this._detailPhase = "entering";
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          this._detailPhase = "open";
+        });
+      });
+    } else {
+      this._detailPhase = "closing";
+      this._detailCloseTimer = setTimeout(() => {
+        this._selectedAreaId = null;
+        this._detailPhase = "closed";
+        this._detailCloseTimer = null;
+      }, DETAIL_TRANSITION_MS);
+    }
+  }
+
+  // Suggests likely occupancy evidence for a room that has none selected yet
+  // (docs/UX_GUIDELINES.md §3's "confident, sensible defaults" /
+  // docs/STATUS.md's noted setup-friction item) — a one-click accept rather
+  // than a silent auto-apply, since area_entity_selections has no way to
+  // distinguish "never configured" from "user explicitly cleared it" (an
+  // absent key means either), and silently reapplying a suggestion after
+  // someone deliberately emptied a room's list would be a real correctness
+  // bug, not a nicety.
+  _suggestedEvidenceEntityIds(area) {
+    if (!this.hass) return [];
+    return area.entity_ids.filter((id) => {
+      const dotIndex = id.indexOf(".");
+      const domain = id.slice(0, dotIndex);
+      if (!OCCUPANCY_EVIDENCE_ENTITY_DOMAINS.has(domain)) return false;
+      const deviceClass = this.hass.states[id]?.attributes?.device_class;
+      if (OCCUPANCY_EVIDENCE_DEVICE_CLASSES.has(deviceClass)) return true;
+      return OCCUPANCY_EVIDENCE_NAME_PATTERN.test(id.slice(dotIndex + 1));
+    });
   }
 
   async _loadEngineState() {
@@ -893,7 +976,9 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     return html`
       <div class="explain">
         <div class="explain-row">
-          <span class="chip chip--${qualityKey}">${qualityLabel}</span>
+          <span class="chip chip--${qualityKey}"
+            ><span class="chip-dot"></span>${qualityLabel}</span
+          >
           <span class="occupant-count">
             ${state.occupant_count} occupant${state.occupant_count === 1 ? "" : "s"}
           </span>
@@ -942,9 +1027,12 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       (e) => e.area_id === area.area_id
     );
     const selectedEntityIds = this._topology.area_entity_selections?.[area.area_id] ?? [];
+    const suggestedEntityIds = selectedEntityIds.length
+      ? []
+      : this._suggestedEvidenceEntityIds(area);
 
     return html`
-      <ha-card class="detail-card">
+      <ha-card class="detail-card detail-card--${this._detailPhase}">
         <div class="detail-header">
           <h2>${area.name}</h2>
           <ha-icon-button label="Close" @click=${() => this._selectArea(null)}>
@@ -1000,6 +1088,25 @@ class OccupancyTrackerTopologyPanel extends LitElement {
             light turning on, a TV switching on. This room is only ever counted as occupied
             because of these.
           </p>
+          ${
+            suggestedEntityIds.length
+              ? html`<div class="suggestion-row">
+                  <ha-icon icon="mdi:auto-fix"></ha-icon>
+                  <span>
+                    ${suggestedEntityIds.length === 1
+                      ? "This room already has a motion sensor Home Assistant knows about."
+                      : "This room already has motion sensors Home Assistant knows about."}
+                  </span>
+                  <button
+                    class="tool-btn"
+                    @click=${() =>
+                      this._setAreaEntitySelections(area.area_id, suggestedEntityIds)}
+                  >
+                    Use ${suggestedEntityIds.length === 1 ? "it" : "them"}
+                  </button>
+                </div>`
+              : nothing
+          }
           ${area.entity_ids.length
             ? html`<ul class="checklist">
                 ${area.entity_ids.map((id) => {
@@ -1174,6 +1281,25 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       flex-shrink: 0;
       margin-top: 1px;
     }
+    .suggestion-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.1));
+      border-radius: var(--ha-card-border-radius, 12px);
+      padding: 8px 10px;
+      margin: 4px 0 12px;
+      font-size: 13px;
+      color: var(--secondary-text-color);
+    }
+    .suggestion-row ha-icon {
+      --mdc-icon-size: 20px;
+      color: var(--primary-color);
+      flex-shrink: 0;
+    }
+    .suggestion-row span {
+      flex: 1;
+    }
     .graph-toolbar {
       display: flex;
       gap: 8px;
@@ -1213,6 +1339,21 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       width: 320px;
       flex-shrink: 0;
       box-sizing: border-box;
+      opacity: 1;
+      transform: translateY(0);
+      /* Duration must match DETAIL_TRANSITION_MS, which keeps the card
+         mounted this long after deselection so this can actually play. */
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+    .detail-card--entering,
+    .detail-card--closing {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .detail-card {
+        transition: none;
+      }
     }
     .layout--narrow .detail-card {
       width: 100%;
@@ -1370,20 +1511,42 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       gap: 8px;
       margin-bottom: 4px;
     }
+    /* A neutral pill (the same tokens .badge already uses) carrying the
+       state's color as a small dot rather than as the pill's own fill:
+       solid --success-color/--warning-color behind white text both fail
+       WCAG contrast outright (verified against the installed
+       home-assistant-frontend bundle's actual values, #43a047/#ffa600 —
+       around 3.3:1 and 2:1, need 4.5:1), and --secondary-text-color flips
+       from readable to nearly invisible between themes since the token
+       itself inverts brightness by theme (#5e5e5e light / #ccc dark — white
+       text on #ccc is ~1.6:1). Pairing a solid dot with normal
+       --primary-text-color text sidesteps per-token contrast tuning
+       entirely, since that pairing is the one HA's own themes already
+       guarantee stays legible. */
     .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       font-size: 12px;
       font-weight: 500;
-      padding: 2px 10px;
+      padding: 2px 10px 2px 8px;
       border-radius: 12px;
-      color: white;
+      background: var(--secondary-background-color, rgba(127, 127, 127, 0.15));
+      color: var(--primary-text-color);
     }
-    .chip--confirmed {
+    .chip-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .chip--confirmed .chip-dot {
       background: var(--success-color, #4caf50);
     }
-    .chip--latched {
+    .chip--latched .chip-dot {
       background: var(--secondary-text-color, #888);
     }
-    .chip--ambiguous {
+    .chip--ambiguous .chip-dot {
       background: var(--warning-color, #ff9800);
     }
     .occupant-count {

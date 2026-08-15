@@ -14,6 +14,204 @@ Format:
 
 ---
 
+## 2026-08-15 — `_plausible_transit_source` now searches multi-hop, nearest-candidate-first, through empty Areas
+**Decision:** `occupancy_engine.py`'s `_plausible_transit_source` no longer only checks an Area's
+*direct* Connector-adjacent neighbors. It now does a breadth-first search outward through any chain of
+currently-*empty* Areas (treating them as transparent), stopping at the first "layer" of the search
+where any occupied, timing-plausible candidate exists — a real 1-hop neighbor always wins over a
+farther one that merely also happens to fall inside the same flat `transit_confirmation_window`.
+Ambiguity (returning `None`, the existing "don't guess" rule) only applies among ties at that same,
+nearest distance.
+**Why:** `SPEC.md` §5.1 explicitly requires this: *"An Area with zero devices/entities is still a valid
+graph node... e.g. a hallway with no sensors at all, connecting two sensored rooms."* The real house
+topology has exactly this shape (`stairs`, connecting `entrance_hallway` and `landing`, has no sensor of
+its own), and a scripted scenario against it
+(`tests/test_engine_scenarios_realhouse.py::test_unsensored_room_is_correctly_skipped_as_a_pass_through`)
+showed the *previous* single-hop-only version simply couldn't satisfy this at all — `landing`'s own
+direct neighbors don't include `entrance_hallway`, only `stairs` does, and `stairs` itself is never
+occupied (nothing ever signals for it), so the old code found zero candidates and treated every
+hallway-to-landing walk as a brand-new, unrelated occupant instead of a continuous transit.
+
+The *first* version of this fix (plain unbounded depth-first search, landing every reachable occupied
+Area into one candidate set regardless of distance) introduced a new, real regression, also caught by a
+scripted scenario before it shipped: a person walking `living_room` → `entrance_hallway` could get
+spuriously blocked because `bedroom`, three empty hops away via `stairs`/`landing`, *also* fell inside
+the same 90-second window purely by coincidental timing — an obviously-implausible farther candidate
+was allowed to tie with (and thus veto) an obviously-correct 1-hop one. The nearest-first,
+stop-at-the-first-non-empty-layer redesign fixes this: a real 1-hop candidate is now always preferred,
+and the search only continues outward when *nothing* closer exists at all.
+
+**A related, deliberately un-fixed finding from the same testing round**: even with the above working
+correctly, an *unrelated* occupant merely re-confirming their own already-occupied room (a common,
+everyday PIR-sensor behavior — someone shifts in their chair, retriggering a motion sensor with no
+actual movement between rooms) can still create a spurious tie against a genuinely separate, unrelated
+transit happening nearby at the same time, if both rooms are equidistant Connector-neighbors of the
+same destination
+(`tests/test_engine_scenarios_realhouse.py::test_coincidental_neighbor_retrigger_can_cause_a_transient_
+overcount`). This falls back to the *same*, already-established "ambiguous, don't guess" behavior — it's
+not a new failure mode, just a newly-characterized trigger for an existing, accepted trade-off — but it
+does mean the model is more sensitive to ordinary sensor noise than the current tests previously probed
+for. Not fixed this session: distinguishing "genuinely fresh arrival evidence" from "just a
+re-confirmation of someone who was already there" would need tracking more state per Area (e.g. a
+separate "became occupied at" timestamp, distinct from "last confirmed at") — a real design question for
+the project owner about how much of that complexity is worth adding, not a quick patch.
+
+**A second, separately-documented finding from the same round**: an 8-hour-later "cold" motion event
+(someone waking up with no intermediate stirring signal) similarly can't be attributed back to a
+long-latched source, for the same reason (the gap is far outside any realistic transit window) —
+`tests/test_engine_scenarios_realhouse.py::test_silent_long_gap_wake_is_a_known_overcounting_limitation`
+documents this as a known, accepted trade-off of the timing-window model rather than something to chase
+here.
+**Alternatives considered:** Bounding the search to a fixed maximum hop count instead of "nearest layer
+wins" — rejected as an arbitrary number with no principled way to choose it for an unknown house size,
+where nearest-first has no such tunable and degrades gracefully on its own. Scaling the effective timing
+window by hop count (a further-away candidate needs proportionally more elapsed time to qualify) —
+a real alternative worth keeping in mind if nearest-first turns out to be insufficient in practice, not
+implemented since nearest-first already resolves every scenario tested this session.
+
+## 2026-08-15 — Egress-arrival confirmation now prefers a freshly-active interior neighbor over OUTSIDE
+**Decision:** `occupancy_engine.py`'s `_confirm_transit` no longer unconditionally attributes a
+confirmed egress-point arrival to `OUTSIDE`. When the pending transit's source is `OUTSIDE`, it now
+first checks `_plausible_transit_source(dest_area_id, now)` — the same timing+adjacency heuristic
+already used for ordinary sensor-less-Connector inference — and, if exactly one Connector-adjacent
+interior Area has fresh, plausible evidence, decrements that Area instead of treating the arrival as a
+genuinely new occupant.
+**Why:** Found via a scripted, known-ground-truth walkthrough scenario against the real house topology
+(`tests/test_engine_scenarios_realhouse.py`, built this session specifically for this kind of
+algorithm-iteration testing — see `docs/STATUS.md`'s Phase 8/9 boundary entry), not by inspection: a
+single person triggering `front_yard`'s motion sensor a few seconds before opening the front door was
+being counted as **two** people — `front_yard` stayed at 1 (its own destination-only inference had no
+way to know a door-crossing was coming and no later signal ever cleared it) while the door's own
+pending-transit confirmation *always* attributes its source to `OUTSIDE` unconditionally, adding a
+second, independent occupant. `front_yard`/`back_yard` being real, sensor-equipped Areas adjacent to an
+egress point (not the egress point itself) rather than a purely synthetic "outside" node is exactly the
+real topology's own shape (see the 2026-08-09 "Outside node removed" entry — access points were always
+just Areas with a crossing-entity list, never a special node type), so this wasn't a contrived edge
+case.
+
+The fix reuses `_plausible_transit_source` rather than a new mechanism, so it inherits that function's
+existing safety properties for free, each separately verified by its own scenario test: a genuinely
+unrelated occupant with stale (outside the confirmation window) evidence is left alone rather than
+misattributed as the door's source, and if more than one neighbor is simultaneously plausible, the
+result stays ambiguous (a new arrival, no neighbor drained) rather than guessing — the same "can't
+resolve a direction, don't guess" rule the ordinary Connector path already applies. A deliberately
+*not*-fixed, closely-related case, left as a documented limitation rather than chased further: if the
+neighboring Area's activity fires *after* the egress arrival is already confirmed (person arrives,
+*then* triggers an adjacent Area's sensor on their way further in), the existing sensor-less-connector
+heuristic can misread that as "walking backward" out of the just-arrived Area — but that's a pre-existing
+property of the timing+adjacency heuristic in general (it has no directional/sequence awareness), not
+something this fix introduces, and fixing it would need a larger, sequence-aware redesign of that
+mechanism, not a targeted change to the egress path alone.
+**Alternatives considered:** Always trusting the door sensor's `OUTSIDE` attribution unconditionally
+(the prior behavior) — rejected, it's the confirmed bug. Inventing a separate, egress-specific
+adjacency heuristic instead of reusing `_plausible_transit_source` — rejected as needless duplication of
+logic that already exists and is already tested for exactly this "timing+adjacency, single-candidate-
+only" judgment call.
+
+## 2026-08-15 — Panel `topology-panel.js` needs a cache-busting URL, and JS regex `\b` doesn't split on `_`
+**Decision:** `panel.py`'s registered `module_url` now has a `?v=<file mtime>` query string appended
+(computed once at panel registration, from the file's own `stat().st_mtime`). Separately, the "Use it"
+suggestion's name-matching regex (see the chip-redesign entry above) was rewritten from `/\bmotion\b/i`
+to `/(?:^|_)(?:motion|occupancy|presence)(?:_|$)/i`.
+**Why:** Two independent, real bugs surfaced during this session's live browser-testing loop with the
+project owner (this session had no browser tool of its own — same "project owner tests, reports back"
+loop prior Phase 7/8 sessions used). First, the suggestion simply never appeared, in a way that
+persisted through a hard refresh *and* a fresh incognito window — traced to HA's static-path serving
+defaulting to aggressive, long-lived caching (`cache_headers=True`, verified from
+`homeassistant/components/http/server.py`'s `StaticPathConfig`) combined with the HA frontend being a
+PWA with its own service worker, neither of which a plain reload reliably bypasses. `topology-panel.js`
+had no versioning in its URL at all, so a browser that had ever loaded it could keep serving a stale
+copy indefinitely — true for local dev iteration and for a real end user's browser after a HACS update.
+Fixed with the mtime-based query string above (chosen over keying it to `manifest.json`'s `version`,
+which would require remembering to bump it on every change — exactly the kind of discipline-dependent
+process this bug came from in the first place).
+
+Second, *even once the caching issue was fixed*, the suggestion still didn't appear — a second,
+separate root cause found by actually testing the regex in Node rather than reasoning about it (the
+original version shipped without that check): `\b` in JavaScript treats `_` as a word character, so
+`/\bmotion\b/` never matches inside
+`landing_motion` — there's no boundary between "landing" and "motion" since both sides of the `_` are
+word characters. This would have silently broken the suggestion for every real HA entity, not just
+this dev instance's `input_boolean` fixtures, since snake_case is the near-universal HA entity-id
+convention. The replacement pattern was verified against 10 real test cases (including the false-
+positive risk "emotion"/"promotion") via an actual Node run before shipping.
+**Alternatives considered:** For the cache-bust: `manifest.json`'s `version` field (rejected — requires
+manual-bump discipline, doesn't fix the class of bug that caused this session's confusion in the first
+place). For the regex: splitting the object id on `_` and checking for an exact-match token (equivalent
+result, chosen the anchored-regex form instead since it reads more directly next to the pattern it's
+replacing).
+
+## 2026-08-15 — Quality chips redesigned as a neutral pill + color dot, not a colored pill + white text
+**Decision:** The three engine-state quality chips (`sensor.py`/panel detail view — Confirmed/Probably
+occupied/Checking…) now render as a neutral pill (`--secondary-background-color` /
+`--primary-text-color`, the same tokens `.badge` already used elsewhere in the panel) with a small
+solid-color dot carrying the state color, instead of a solid colored pill (`--success-color`/
+`--warning-color`/`--secondary-text-color`) with white text.
+**Why:** `docs/UX_GUIDELINES.md` §6/§7 require sufficient color contrast in both themes, checked off as
+still-open in `docs/STATUS.md`'s Phase 8 follow-up list. Actually checked this session (verified
+against the real color values in the installed `home-assistant-frontend` 20260729.6 bundle, not
+guessed): white text on `--success-color` (`#43a047`) is ~3.3:1, on `--warning-color` (`#ffa600`) is
+~2:1 — both fail WCAG AA's 4.5:1 for small text in *both* themes, since those tokens are theme-invariant.
+White text on `--secondary-text-color` was worse than it looked: it passes in light theme (`#5e5e5e`,
+~6.5:1) but is nearly invisible in dark theme (`#ccc`, ~1.6:1), since that token deliberately inverts
+brightness by theme. A neutral pill sidesteps per-token contrast tuning entirely, since
+`--primary-text-color` on `--secondary-background-color` is a pairing HA's own themes already
+guarantee stays legible — the color moves to a small decorative dot instead of carrying the text.
+**Alternatives considered:** Picking a different literal text color per chip per theme — rejected,
+since it would need `prefers-color-scheme`-style forking that fights this project's rule of theming
+exclusively through HA custom properties, and would need re-tuning against every custom HA theme, not
+just the two built-in ones just checked.
+
+## 2026-08-15 — House-level entities need an explicit `entity_id`, or HA silently joins the device name into it
+**Decision:** `TotalOccupantCountSensor` (`sensor.py`) and `PreArmedBinarySensor` (`binary_sensor.py`)
+now set `self.entity_id` explicitly (`"sensor.total_occupant_count"` /
+`"binary_sensor.pre_armed"`) in `__init__`, alongside their existing `_attr_device_info`.
+**Why:** Phase 8's device-grouping feature (`_attr_device_info` linking both entities to the
+virtual `DeviceEntryType.SERVICE` device) had a real, undiscovered side effect: for a **brand-new**
+entity (no pre-existing registry entry to match by `unique_id`), HA's entity-id generation does not
+skip the device-name join just because `has_entity_name` is `False`. Traced through the installed
+`homeassistant` 2026.8.1 source (not guessed, per `CLAUDE.md`'s hard rule): `entity_platform.py`'s
+`_async_derive_object_ids` only routes an entity's suggested name into `entity_registry.py`'s
+`suggested_object_id` parameter (documented, and verified in `_async_get_full_entity_name`, to skip
+the device-name join) when `entity.internal_integration_suggested_object_id` is already set — which
+only happens when the entity's own `entity_id` was set explicitly before being added. Without that,
+the name flows into `object_id_base` instead, which gets joined with the device's name regardless of
+`has_entity_name` whenever there's no existing prefix to strip — silently producing
+`sensor.occupancy_tracker_total_occupant_count` instead of the documented, spec'd
+`sensor.total_occupant_count`. Caught by 6 failing tests in the full suite this session, not by
+inspection — this project's own dev instance was never exposed to it (its two entities were created
+2026-08-08, before device-grouping existed, and HA doesn't rename an existing entity's `entity_id`
+just because a later reload's naming logic would suggest something different), but any fresh install
+from this point forward would have hit it.
+**Alternatives considered:** Dropping `_attr_device_info` entirely (loses the "Visit" link back to the
+panel from Settings → Devices & Services — a deliberate, project-owner-verified Phase 8 feature, not
+worth reverting). Setting `_attr_has_entity_name = True` (would also change the entities' *friendly
+names* to "Occupancy Tracker Total Occupant Count" / "Occupancy Tracker Pre-Armed" — a real
+user-visible naming change beyond what this bug required fixing). Setting
+`internal_integration_suggested_object_id` directly — its own docstring says "Only handled
+internally, never to be used by integrations," ruled out on inspection.
+
+## 2026-08-15 — Test bug: faking a topology-selected entity via `hass.states.async_set` isn't enough
+**Decision:** `test_setup_entry_skips_entities_for_untracked_areas`,
+`test_reload_removes_entities_for_areas_deselected_entirely` (`tests/test_init.py`), and
+`_setup_entry_with_tracked_kitchen` (`tests/test_services.py`) now register their test motion entity
+properly via `entity_registry.async_get_or_create(...)` +
+`entity_registry.async_update_entity(..., area_id=kitchen.id)` before selecting it as activity
+evidence, matching the pattern every other test in the suite already used (see e.g.
+`tests/test_entities.py`).
+**Why:** `RegistrySync._build_house_shape()` builds its `HouseShape` purely from the entity registry
+(`registry_sync.py`), never from bare `hass.states`. These three call sites instead did
+`hass.states.async_set("binary_sensor.kitchen_motion", "off")` with no registry entry at all, so
+`TopologyStore.reconcile()` correctly (per its own dangling-reference-stripping logic) dropped the
+selection on every save/reload, and the room was never actually tracked — the assertions failed not
+because of a product bug, but because the test never gave the code a real entity to find. This was
+caught the same way as the entity-id bug above: running the full suite surfaced 3 of the 6 failures
+this session, unrelated to that other bug, both predating this session (zero Python was touched before
+this fix) despite `docs/STATUS.md`'s Phase 8 entry claiming these exact three `test_init.py` tests
+were added and verified "clean" — that claim did not hold up against re-running the suite.
+**Alternatives considered:** None — this is a straight correction to match the already-established,
+correct pattern used everywhere else in the suite, not a new testing approach.
+
 ## 2026-08-09 — Reverted the `@yme207` placeholder: it was the project owner's real handle all along
 **Decision:** `manifest.json`'s `codeowners`/`documentation`/`issue_tracker` now point at
 `@yme207`/`github.com/yme207/occupancy-tracker` again, and `README.md`'s "Installation" section has a

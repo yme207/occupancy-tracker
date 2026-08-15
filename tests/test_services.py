@@ -10,6 +10,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.occupancy_tracker.const import DOMAIN
@@ -37,9 +38,20 @@ async def _setup_entry_with_tracked_kitchen(
     entities, see test_init.py's own tests for that behavior).
     """
     kitchen = area_registry.async_get_or_create("Kitchen")
+    # RegistrySync's house shape is built purely from the entity registry
+    # (registry_sync.py's _build_house_shape), not from bare states — the
+    # selected entity has to actually be registered with this Area or
+    # TopologyStore.reconcile() strips it as a dangling reference (see
+    # test_init.py's identical registration pattern).
+    entity_registry = er.async_get(hass)
+    motion_entry = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "kitchen-motion-unique-id", suggested_object_id="kitchen_motion"
+    )
+    entity_registry.async_update_entity(motion_entry.entity_id, area_id=kitchen.id)
+    hass.states.async_set(motion_entry.entity_id, "off")
     entry = await _setup_entry(hass)
     await entry.runtime_data.topology_store.async_save(
-        TopologyData(area_entity_selections={kitchen.id: ("binary_sensor.kitchen_motion",)})
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry.entity_id,)})
     )
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
