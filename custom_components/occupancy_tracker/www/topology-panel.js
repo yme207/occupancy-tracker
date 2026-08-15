@@ -68,6 +68,17 @@ const OCCUPANCY_EVIDENCE_ENTITY_DOMAINS = new Set(["binary_sensor", "input_boole
 // never matched anything. Anchoring on "_"/start/end explicitly instead.
 const OCCUPANCY_EVIDENCE_NAME_PATTERN = /(?:^|_)(?:motion|occupancy|presence)(?:_|$)/i;
 
+// signal_ingestion.py's _ACTIVE_STATE only ever matches a literal state
+// string of "on" (see docs/DECISIONS.md) — broader than the suggestion
+// domains above (switch/light are reasonable manual picks even though the
+// suggestion heuristic doesn't auto-guess them), but still only domains
+// that actually report "on"/"off". A media_player (state "playing"/"idle"),
+// a cover (state "open"/"closed"), or a numeric sensor would be pickable in
+// an unfiltered checklist but would then silently never register as
+// evidence, with no error anywhere — checklists below filter to this set
+// instead of promising something the backend can't classify yet.
+const SELECTABLE_EVIDENCE_ENTITY_DOMAINS = new Set(["binary_sensor", "switch", "light", "input_boolean"]);
+
 // Must match the setTimeout delay in _selectArea's closing branch — the
 // detail card stays mounted this long after deselection so its CSS
 // transition can actually finish playing before Lit removes it from the DOM.
@@ -625,6 +636,15 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     });
   }
 
+  // Both checklists below (egress crossing-sensors and "what counts as
+  // activity") must only offer entities the backend can actually act on —
+  // see SELECTABLE_EVIDENCE_ENTITY_DOMAINS's own comment.
+  _selectableEntityIds(area) {
+    return area.entity_ids.filter((id) =>
+      SELECTABLE_EVIDENCE_ENTITY_DOMAINS.has(id.slice(0, id.indexOf(".")))
+    );
+  }
+
   async _loadEngineState() {
     if (!this._entryId || !this.hass) return;
     try {
@@ -1030,6 +1050,11 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     const suggestedEntityIds = selectedEntityIds.length
       ? []
       : this._suggestedEvidenceEntityIds(area);
+    const selectableEntityIds = this._selectableEntityIds(area);
+    const unsupportedNotice = html`<p class="muted">
+      None of this room's Home Assistant entities can be used yet — only motion/contact sensors,
+      switches, lights, and helpers are currently supported.
+    </p>`;
 
     return html`
       <ha-card class="detail-card detail-card--${this._detailPhase}">
@@ -1060,9 +1085,9 @@ class OccupancyTrackerTopologyPanel extends LitElement {
             Check the door or window sensor(s) in this room that would notice someone coming in
             or going out.
           </p>
-          ${area.entity_ids.length
+          ${selectableEntityIds.length
             ? html`<ul class="checklist">
-                ${area.entity_ids.map((id) => {
+                ${selectableEntityIds.map((id) => {
                   const checked = egressPoint?.entity_ids.includes(id) ?? false;
                   return html`
                     <li>
@@ -1079,14 +1104,16 @@ class OccupancyTrackerTopologyPanel extends LitElement {
                   `;
                 })}
               </ul>`
-            : html`<p class="muted">
-                This room has no sensors or devices in Home Assistant yet.
-              </p>`}
+            : area.entity_ids.length
+              ? unsupportedNotice
+              : html`<p class="muted">
+                  This room has no sensors or devices in Home Assistant yet.
+                </p>`}
           <p class="row"><ha-icon icon="mdi:eye-check-outline"></ha-icon> What counts as activity</p>
           <p class="muted">
             Check any sensors or devices that mean someone's in this room — a motion sensor, a
-            light turning on, a TV switching on. This room is only ever counted as occupied
-            because of these.
+            light turning on, a smart plug switching on. This room is only ever counted as
+            occupied because of these.
           </p>
           ${
             suggestedEntityIds.length
@@ -1107,9 +1134,9 @@ class OccupancyTrackerTopologyPanel extends LitElement {
                 </div>`
               : nothing
           }
-          ${area.entity_ids.length
+          ${selectableEntityIds.length
             ? html`<ul class="checklist">
-                ${area.entity_ids.map((id) => {
+                ${selectableEntityIds.map((id) => {
                   const checked = selectedEntityIds.includes(id);
                   return html`
                     <li>
@@ -1126,9 +1153,11 @@ class OccupancyTrackerTopologyPanel extends LitElement {
                   `;
                 })}
               </ul>`
-            : html`<p class="muted">
-                This room has no sensors or devices in Home Assistant yet.
-              </p>`}
+            : area.entity_ids.length
+              ? unsupportedNotice
+              : html`<p class="muted">
+                  This room has no sensors or devices in Home Assistant yet.
+                </p>`}
         </div>
       </ha-card>
     `;

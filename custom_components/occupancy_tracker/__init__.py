@@ -163,11 +163,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
     # then again on every live registry change (docs/SPEC.md §5.3).
     await topology_store.async_reconcile_and_save(registry_sync.house_shape)
 
+    _previous_house_shape = registry_sync.house_shape
+
+    async def _reconcile_and_reload_if_stale(previous: HouseShape, current: HouseShape) -> None:
+        """Reconcile the stored topology, then reload if the *live* engine/
+        entities are now stale relative to it (SPEC.md §5.3: a registry
+        change must not require the user to notice and manually fix things).
+
+        `TopologyStore.reconcile()` only strips references that became
+        outright invalid (an Area/entity removed, an entity moved to a
+        different Area) — a pure rename changes nothing it tracks, since
+        `area_id` (what topology data keys on) is stable across a rename;
+        only `.name` (what the already-created sensor/binary_sensor entities
+        captured once, at entity-creation time, into their `_attr_name`)
+        changes. Both cases need a reload to actually show up: the
+        reconciliation case rebuilds the engine's graph and signal
+        ingestion's subscriptions from the cleaned-up topology; the rename
+        case just needs the entity platforms to re-read the current name.
+        Scoped to `active_area_ids` (areas that actually have entities) so a
+        rename of some *other*, untracked Area in a busy house doesn't
+        trigger a reload for no visible effect.
+        """
+        removed = await topology_store.async_reconcile_and_save(current)
+        active = active_area_ids(topology_store.topology)
+        renamed = any(
+            area_id in previous.areas
+            and previous.areas[area_id].name != current.areas[area_id].name
+            for area_id in active
+        )
+        if removed or renamed:
+            await hass.config_entries.async_reload(entry.entry_id)
+
     @callback
     def _handle_house_shape_changed() -> None:
+        nonlocal _previous_house_shape
+        previous, current = _previous_house_shape, registry_sync.house_shape
+        _previous_house_shape = current
         entry.async_create_task(
             hass,
-            topology_store.async_reconcile_and_save(registry_sync.house_shape),
+            _reconcile_and_reload_if_stale(previous, current),
             "occupancy_tracker_topology_reconcile",
         )
 

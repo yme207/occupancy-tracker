@@ -940,14 +940,30 @@ restriction entirely. Fixed directly (not via the deprecated `helpers.service.ve
 verified from the actual installed HA source to be scheduled for removal in 2026.10 and not even the
 right check — it gates per-entity domain control, not admin status). Two new tests cover both sides.
 164 tests passing (was 162), `ruff`/`ruff format --check`/`mypy` all clean. See `docs/DECISIONS.md`'s
-new 2026-08-15 "`SPEC.md` §13 Q1 resolved" entry. **Not yet committed.**
+new 2026-08-15 "`SPEC.md` §13 Q1 resolved" entry. Committed as `2df61ab` and pushed.
+
+**Seventh** (still 2026-08-15): with the project owner about to deploy to their real HA instance to
+test, did a full pre-deployment audit — every backend module and the frontend panel read against
+`SPEC.md`/`ARCHITECTURE.md`, not just the passing test suite. No crash-causing or data-corruption bugs
+found; two real effectiveness/requirements gaps found and fixed (both invisible against
+`input_boolean` test fixtures, both likely to surface immediately against real devices/usage): the
+topology panel let the user pick any entity (including a TV/`media_player`, which its own copy
+suggested) as occupancy evidence even though the backend only ever matches a literal `state == "on"`,
+so a `media_player`-style pick would silently never register; and a live Area rename didn't reload the
+entry, so already-created sensor entities kept showing the old room name indefinitely. See
+`docs/DECISIONS.md`'s new 2026-08-15 "Pre-deployment code audit" entry for the fixes and the full list
+of things checked-and-confirmed-fine (no XSS surface, correct listener cleanup throughout, no
+reentrancy risk, mid-setup-failure cleanup verified against HA core source, etc.), plus three further
+gaps confirmed but deliberately left as-is for now (documented there). 166 tests passing (was 164),
+`ruff`/`ruff format --check`/`mypy` all clean.
 
 Remaining, not blocking either half of this session's work:
 
 1. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
    evidence or when actually pursuing HACS default-repository submission.
-2. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
-   fixtures — never tried yet, worth doing before calling Phase 8 done.
+2. **The actual real-sensor smoke test itself** — everything above was preparation for it; this is
+   now the natural next session, and the first real test of everything built so far against sensors
+   this project has never seen before.
 3. `SPEC.md` §13's remaining two open questions: backup/restore's v1-vs-later status (arguably
    already resolved in practice — `export_topology`/`import_topology` already exist — worth a
    deliberate "yes, that's it" close-out rather than leaving the question open by omission), and the

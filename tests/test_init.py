@@ -201,6 +201,70 @@ async def test_setup_entry_reconciles_topology_on_live_area_removal(
     assert topology_store.topology.connectors == ()
 
 
+async def test_renaming_an_active_area_reloads_so_entity_names_stay_current(
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    entity_registry: er.EntityRegistry,
+    enable_custom_integrations: None,
+) -> None:
+    """A rename doesn't invalidate anything `TopologyStore.reconcile()`
+    tracks (area_id is stable across a rename, only `.name` changes) — but
+    the already-created `sensor.kitchen_occupant_count` entity's friendly
+    name was captured once, at entity-creation time, from the *old* name.
+    Without an explicit reload-on-rename, SPEC.md §5.3's "must not require
+    the user to notice and manually fix things" would be silently violated
+    for the single most common registry edit a real household makes.
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    motion_entry = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "kitchen-motion-unique-id", suggested_object_id="kitchen_motion"
+    )
+    entity_registry.async_update_entity(motion_entry.entity_id, area_id=kitchen.id)
+    hass.states.async_set(motion_entry.entity_id, "off")
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await entry.runtime_data.topology_store.async_save(
+        TopologyData(area_entity_selections={kitchen.id: (motion_entry.entity_id,)})
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.kitchen_occupant_count").attributes["friendly_name"] == (
+        "Kitchen Occupant Count"
+    )
+
+    area_registry.async_update(kitchen.id, name="Cucina")
+    await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.kitchen_occupant_count")
+    assert state is not None
+    assert state.attributes["friendly_name"] == "Cucina Occupant Count"
+
+
+async def test_renaming_an_untracked_area_does_not_reload(
+    hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
+) -> None:
+    """The rename-triggers-reload behavior is scoped to Areas that actually
+    have entities exposed — a rename of some other, untracked Area (or one
+    with nothing selected) has nothing user-visible to fix, so it shouldn't
+    cost a reload (brief entity-unavailable window) for no effect.
+    """
+    garage = area_registry.async_get_or_create("Garage")
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    engine_before_rename = entry.runtime_data.engine
+
+    area_registry.async_update(garage.id, name="Workshop")
+    await hass.async_block_till_done()
+
+    # A reload would have replaced runtime_data with a brand-new engine
+    # instance — same instance survives means no reload happened.
+    assert entry.runtime_data.engine is engine_before_rename
+
+
 async def test_unload_entry_stops_registry_sync_listening(
     hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
 ) -> None:

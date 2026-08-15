@@ -14,6 +14,60 @@ Format:
 
 ---
 
+## 2026-08-15 — Pre-deployment code audit: evidence-domain gap and stale-registry-name gap fixed
+**Decision:** Ahead of the project owner's first real-house deployment, did a full read-through of
+every backend module and the frontend panel against `SPEC.md`/`ARCHITECTURE.md`, not just the
+passing test suite. Found no crash-causing or data-corruption bugs, but two real
+effectiveness/requirements gaps, both fixed:
+
+1. **Evidence checklists now filter to domains that actually work.** `signal_ingestion.py`'s
+   `_ACTIVE_STATE` only ever matches a literal `state == "on"` transition, but the topology panel's
+   "what counts as activity" and egress-crossing checklists let the user tick *any* entity in a room,
+   with copy that explicitly suggested "a TV switching on" as an example (SPEC.md §5.2 itself uses
+   "this TV" as an example too). A real `media_player` reports `playing`/`paused`/`idle`, not `on` —
+   picking one the way the UI's own copy suggested would silently never register, forever, with zero
+   error anywhere. `topology-panel.js` now filters both checklists to
+   `SELECTABLE_EVIDENCE_ENTITY_DOMAINS` (`binary_sensor`, `switch`, `light`, `input_boolean` — the
+   domains that actually report "on"/"off"), with a distinct "none of this room's entities are
+   supported yet" message when a room has entities but none in a selectable domain (as opposed to
+   "this room has no sensors at all"). The "what counts as activity" copy's misleading TV example was
+   replaced with "a smart plug switching on." No automated test covers frontend JS (per
+   `docs/STATUS.md`'s standing note); manual in-browser verification is the check for this one.
+2. **A live Area rename now reloads the entry; an unrelated one no longer does.**
+   `TopologyStore.reconcile()` only strips references that became outright *invalid* (an Area/entity
+   removed or moved) — a pure rename changes nothing it tracks, since `area_id` is stable across a
+   rename and only `.name` changes. But `AreaOccupantCountSensor`/`AreaOccupiedBinarySensor` capture
+   `area_name` once, at entity-creation time, into `_attr_name` — so a real Area rename (almost
+   certainly the single most common registry edit an actual household ever makes) left the HA UI
+   showing the *old* room name indefinitely, silently violating SPEC.md §5.3's "must not require the
+   user to notice and manually fix things." `__init__.py`'s `_handle_house_shape_changed` now tracks
+   the previous `HouseShape` snapshot and triggers `hass.config_entries.async_reload` whenever
+   reconciliation actually removed something *or* an `active_area_ids`-tracked Area's name changed —
+   scoped to tracked Areas specifically so a rename of some *other*, untracked Area in a busy house
+   doesn't cost a reload for no visible effect. Two new tests
+   (`test_renaming_an_active_area_reloads_so_entity_names_stay_current`,
+   `test_renaming_an_untracked_area_does_not_reload`) cover both the fix and the scoping. 166 tests
+   passing (was 164), `ruff`/`ruff format --check`/`mypy` all clean.
+
+Also confirmed, not fixed (documented, deliberate, or genuinely low-risk — see the project owner's
+audit-request conversation for the full list): quality-tier freshness and pending-transit expiry only
+recompute on the next signal or property read, never on a timer (deliberate anti-polling trade-off,
+Phase 4); SPEC.md §8's "diagnostic listing of open ambiguous transits" exists on the websocket API but
+isn't exposed as an HA entity/attribute; the frontend panel doesn't live-refresh its house-shape
+snapshot after initial load. None of these block a first real-sensor test.
+**Why:** The project owner explicitly asked for a thorough pre-deployment audit against requirements,
+efficiency, effectiveness, and stability before testing against their real Home Assistant instance —
+both fixed issues are exactly the kind of gap that stays invisible against `input_boolean` test
+fixtures (which never have a "not on/off" state, and are never renamed mid-session) but would surface
+immediately against real devices and real day-to-day HA usage.
+**Alternatives considered:** For the evidence-domain gap, extending `signal_ingestion.py` with a
+richer per-domain/device-class "is this state positive activity evidence" classifier (e.g. treating a
+`media_player`'s `playing`/`paused` as evidence) — rejected as the larger, riskier change for this
+pass; restricting the checklist to what already works is the honest, low-risk fix, and the module's
+own docstring already flags richer classification as deliberate future work. For the rename gap,
+reloading on *any* house-shape change unconditionally — rejected as unnecessary churn (brief
+entity-unavailable window) for registry activity this integration doesn't even track.
+
 ## 2026-08-15 — `SPEC.md` §13 Q1 resolved: topology *editing* is admin-only, *viewing* is not
 **Decision:** `services.py`'s `import_topology` service (a full-topology overwrite, reachable via
 Developer Tools or an automation, not just the panel) now requires the calling user to be an admin,
