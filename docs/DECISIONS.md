@@ -51,6 +51,23 @@ token/ref handling in this exact manifest-fetch path). `check-repository`'s miss
 remain, unchanged — still a GitHub repo-settings action for the project owner, not a file this repo
 controls.
 
+**2026-08-15 second follow-up:** The project owner set the repo's description and topics via the
+GitHub UI; a re-run (same commit `aca401c`, no code change) confirmed `check-repository` now passes
+(4/8 → 2/8 failed). `check-manifest`/`hacsjson` failed identically on the re-run, weakening the
+pure-transient-flake read. Traced HACS's actual `validate_repository` source
+(`hacs/integration`'s `repositories/integration.py`): it resolves the integration folder by scanning
+the repo tree under `custom_components/` (this repo has exactly one folder there, `occupancy_tracker`
+— unambiguous, not the cause), then fetches and JSON-decodes `manifest.json` via GitHub's API. Since
+`hassfest` — HA's own first-party manifest validator — parses that same file cleanly with every
+required key present, the defect is somewhere in HACS's fetch/decode path itself, not in this repo's
+files; deeper tracing wasn't possible without literal source access. Importantly, HACS's own docs
+describe `check-manifest`/`check-repository` as part of the *default-repository submission* review
+process, not a gate on custom-repository (add-by-URL) installs — this project's near-term
+distribution path per the 2026-08-08 "HACS validation ignores the brand-assets check" entry. Treating
+this as a known, non-blocking CI gap rather than continuing to guess at further local changes with no
+new evidence; revisit only if/when actually pursuing HACS default-repository submission (`SPEC.md`
+§13 Q3, still open) or if a future CI run surfaces new information.
+
 ## 2026-08-15 — `_plausible_transit_source` now searches multi-hop, nearest-candidate-first, through empty Areas
 **Decision:** `occupancy_engine.py`'s `_plausible_transit_source` no longer only checks an Area's
 *direct* Connector-adjacent neighbors. It now does a breadth-first search outward through any chain of

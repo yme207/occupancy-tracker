@@ -920,17 +920,24 @@ upstream HACS flake (`hacs/integration` #5252), not a defect here. Added an expl
 input to the `hacs` job in `.github/workflows/ci.yml` as a low-cost, non-destructive attempt, but the
 honest expectation is this may just need a re-run or a wait, not a further code change.
 
+**Fifth** (still 2026-08-15): the project owner set the repo's description and topics via the GitHub
+UI; a re-run confirmed `check-repository` passes (4/8 → 2/8 checks failed). `check-manifest`/
+`hacsjson` failed identically on the re-run (same commit, no code change), so it's not a simple
+flake that clears on retry. Traced HACS's own validation source to rule out a path-resolution bug in
+this repo (only one folder under `custom_components/`, unambiguous) — the defect is somewhere in
+HACS's own manifest fetch/decode path, not this repo's files, and not further traceable without
+literal source access. HACS's docs describe this check as part of *default-repository submission*
+review, not a gate on custom-repository (add-by-URL) installs — this project's actual near-term
+distribution path — so it's now tracked as a known, non-blocking CI gap rather than chased further
+without new evidence. See `docs/DECISIONS.md`'s two 2026-08-15 follow-ups for the full trace.
+
 Remaining, not blocking either half of this session's work:
 
-1. **Confirm a later CI run clears `check-manifest`** — if it's still red after a re-run/re-push with
-   no further repo changes, that's strong confirmation it's the upstream HACS flake, not this repo;
-   no further local fix should be attempted without new evidence.
-2. Set the GitHub repo's description and topics (Settings → General / the sidebar "About" gear on
-   the repo page) — required for `hacs`'s `check-repository` to pass; no tool in this environment can
-   set them.
-3. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
+1. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
+   evidence or when actually pursuing HACS default-repository submission.
+2. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
    fixtures — never tried yet, worth doing before calling Phase 8 done.
-4. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
+3. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
    a long-lived access token consistently failed HA's own auth validation for a reason not fully
    root-caused (ruled out: IP ban, `local_only` restriction, storage-write timing, token/id mismatch —
    all checked against real source or real storage, not guessed). Not pursued further because the
