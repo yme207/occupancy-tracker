@@ -749,6 +749,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         <ha-card class="graph-card">
           <div class="card-header">
             <h1>Areas &amp; connections</h1>
+            ${this._renderLiveStats()}
           </div>
           <p class="card-subtitle">
             Your rooms, pulled directly from Home Assistant. Drag a room to move it, or click one
@@ -810,6 +811,14 @@ class OccupancyTrackerTopologyPanel extends LitElement {
                       ><span class="legend-swatch legend-swatch--egress"></span>Dashed ring = this
                       room has an access point (a door to outside)</span
                     >
+                    <span class="legend-item">
+                      <span class="legend-dots">
+                        <span class="legend-dot legend-dot--confirmed"></span>
+                        <span class="legend-dot legend-dot--latched"></span>
+                        <span class="legend-dot legend-dot--ambiguous"></span>
+                      </span>
+                      Ring color = confirmed / latched / ambiguous
+                    </span>
                   </div>`
                 : nothing
             }
@@ -838,6 +847,31 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     const hasEvidence = (this._topology.area_entity_selections?.[areaId] ?? []).length > 0;
     const isAccessPoint = (this._topology.egress_points ?? []).some((e) => e.area_id === areaId);
     return hasEvidence || isAccessPoint;
+  }
+
+  // Total occupancy + pending-transit count, always visible on the main
+  // graph page rather than buried in a per-room click-through — added for
+  // walking-the-house live debugging (project-owner feedback): both values
+  // are already pushed live via _subscribeEngineState's subscription, this
+  // just surfaces what was already being fetched.
+  _renderLiveStats() {
+    if (!this._engineState) return nothing;
+    const total = this._engineState.total_occupant_count ?? 0;
+    const pending = this._engineState.pending_transits?.length ?? 0;
+    return html`
+      <div class="live-stats">
+        <span class="badge badge--stat">
+          <ha-icon icon="mdi:account-multiple"></ha-icon>
+          ${total} total occupant${total === 1 ? "" : "s"}
+        </span>
+        ${pending
+          ? html`<span class="badge badge--stat badge--pending">
+              <ha-icon icon="mdi:transit-connection-variant"></ha-icon>
+              ${pending} pending transit${pending === 1 ? "" : "s"}
+            </span>`
+          : nothing}
+      </div>
+    `;
   }
 
   _renderGraph() {
@@ -941,12 +975,20 @@ class OccupancyTrackerTopologyPanel extends LitElement {
           const isEgress = egressAreaIds.has(area.area_id);
           const selected = area.area_id === this._selectedAreaId;
           const isConnectSource = area.area_id === this._connectSourceAreaId;
+          const isActive = this._isAreaActive(area.area_id);
+          // Quality (SPEC.md §6.8: confirmed/latched/ambiguous) as a ring
+          // color, readable at a glance while walking the house — same
+          // colors as the detail panel's own quality chip (chip--confirmed
+          // etc.), just applied to the node's stroke instead of a dot, so
+          // there's nothing new to learn between the two views.
+          const quality = isActive ? this._engineState?.areas?.[area.area_id]?.quality : null;
           const classes = [
             "node",
             isEgress ? "node--egress" : "",
             selected ? "node--selected" : "",
             isConnectSource ? "node--connect-source" : "",
-            this._isAreaActive(area.area_id) ? "" : "node--inactive",
+            isActive ? "" : "node--inactive",
+            quality ? `node--quality-${quality.toLowerCase()}` : "",
           ]
             .filter(Boolean)
             .join(" ");
@@ -967,7 +1009,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
             >
               <circle r=${NODE_RADIUS}></circle>
               ${
-                this._isAreaActive(area.area_id)
+                isActive
                   ? svg`<text class="node-count" dy="0.35em">${this._engineState?.areas?.[area.area_id]?.occupant_count ?? 0}</text>`
                   : nothing
               }
@@ -1260,6 +1302,23 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       font-size: 14px;
       margin: 4px 0 16px;
     }
+    .live-stats {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .badge--stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .badge--stat ha-icon {
+      --mdc-icon-size: 15px;
+    }
+    .badge--pending {
+      color: var(--warning-color, #ff9800);
+    }
     .graph-footer {
       display: flex;
       flex-direction: column;
@@ -1293,6 +1352,24 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       height: 14px;
       border: 2px dashed var(--primary-color);
       border-radius: 50%;
+    }
+    .legend-dots {
+      display: inline-flex;
+      gap: 3px;
+    }
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .legend-dot--confirmed {
+      background: var(--success-color, #4caf50);
+    }
+    .legend-dot--latched {
+      background: var(--secondary-text-color, #888);
+    }
+    .legend-dot--ambiguous {
+      background: var(--warning-color, #ff9800);
     }
     .empty-topology-notice {
       display: flex;
@@ -1495,6 +1572,21 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     }
     .node--inactive text {
       opacity: 0.6;
+    }
+    /* Quality ring color (SPEC.md §6.8) — same tokens as the detail panel's
+       chip--confirmed/latched/ambiguous dots, applied to the node's stroke
+       instead so a room's current belief is readable without clicking in.
+       Placed before .node--selected/.node--connect-source below so those
+       still win when a node is simultaneously mid-interaction. */
+    .node--quality-confirmed circle {
+      stroke: var(--success-color, #4caf50);
+    }
+    .node--quality-latched circle {
+      stroke: var(--secondary-text-color, #888);
+    }
+    .node--quality-ambiguous circle {
+      stroke: var(--warning-color, #ff9800);
+      stroke-width: 3;
     }
     .node--selected circle {
       fill: var(--primary-color);

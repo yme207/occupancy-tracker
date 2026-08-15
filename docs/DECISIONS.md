@@ -14,6 +14,24 @@ Format:
 
 ---
 
+## 2026-08-15 — Live Total Occupancy/quality surfaced on the main graph page, not just per-room
+**Decision:** The topology panel's "Areas & connections" page now shows a live Total Occupancy
+count and a pending-transits count in the card header, and colors each room node's ring by its
+current quality tier (green/gray/orange for confirmed/latched/ambiguous) — reusing the exact same
+`--success-color`/`--secondary-text-color`/`--warning-color` tokens the per-room detail panel's
+quality chip already uses, so there's nothing new to learn between the two views. A legend entry
+explains the ring colors, per `docs/UX_GUIDELINES.md` §6 (don't rely on color alone without a label).
+**Why:** The project owner, mid-real-house-deployment, wanted to walk around and watch occupancy
+state change live without clicking into each room individually to check it. All of this data
+(`total_occupant_count`, `pending_transits`, per-Area `quality`) was already being fetched and kept
+live via the existing `occupancy_tracker/engine/subscribe_updates` websocket subscription
+(`_engineState`, already a reactive Lit property) — it just wasn't rendered anywhere outside the
+per-room detail click-through, so this is a rendering-only change, no new backend surface.
+**Alternatives considered:** A separate always-visible per-room quality chip (like the detail
+panel's) instead of a ring color — rejected as too visually busy on a graph meant to also show
+several rooms and their connections at once; a ring-color change layers onto the existing node
+without adding new on-graph text.
+
 ## 2026-08-15 — Pre-deployment code audit: evidence-domain gap and stale-registry-name gap fixed
 **Decision:** Ahead of the project owner's first real-house deployment, did a full read-through of
 every backend module and the frontend panel against `SPEC.md`/`ARCHITECTURE.md`, not just the

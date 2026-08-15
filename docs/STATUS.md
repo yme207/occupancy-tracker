@@ -957,13 +957,32 @@ reentrancy risk, mid-setup-failure cleanup verified against HA core source, etc.
 gaps confirmed but deliberately left as-is for now (documented there). 166 tests passing (was 164),
 `ruff`/`ruff format --check`/`mypy` all clean.
 
+**Eighth** (still 2026-08-15): the project owner began the actual real-house deployment. Repository
+made public on GitHub (required for HACS's custom-repository install path — HACS's own docs are
+explicit that private repos aren't supported at all) after a full repo-history secret/PII sweep found
+nothing sensitive in any tracked file across all commits, but did find the project owner's personal
+email embedded in every commit's git author metadata; history was rewritten (`git filter-branch`,
+env-filter on `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL`) to a `users.noreply.github.com` address and
+force-pushed before going public — verified afterward that `origin/master` matches the rewritten local
+history exactly, and that the pre-rewrite commits only survive in an unpushed local
+`backup-before-email-scrub` branch. Installed via HACS custom repository (category: Integration) onto
+the project owner's real HA instance. First real-hardware topology wrinkle hit immediately: a
+Konnected Alarm Panel Pro exposes front/back door entities that all inherit its own Area (Scullery,
+where the physical panel sits) rather than the doors' actual rooms — resolved via HA's per-entity
+"use device area" toggle (Settings → Devices & Services → Entities → entity settings), which
+`registry_sync.py`'s existing entity-area-before-device-area precedence already respects with no code
+change needed. Added a live Total Occupancy/pending-transits readout and per-room quality-color node
+rings to the topology panel's main graph page (previously only visible per-room via a click-through)
+for live walk-the-house debugging — see `docs/DECISIONS.md`'s new entry; JS-only, no automated test,
+verify visually in-browser.
+
 Remaining, not blocking either half of this session's work:
 
 1. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
    evidence or when actually pursuing HACS default-repository submission.
-2. **The actual real-sensor smoke test itself** — everything above was preparation for it; this is
-   now the natural next session, and the first real test of everything built so far against sensors
-   this project has never seen before.
+2. **The real-sensor smoke test is now actively underway** — first real test of everything built so
+   far against sensors this project has never seen before; expect more real-hardware wrinkles like the
+   Konnected one above as it continues.
 3. `SPEC.md` §13's remaining two open questions: backup/restore's v1-vs-later status (arguably
    already resolved in practice — `export_topology`/`import_topology` already exist — worth a
    deliberate "yes, that's it" close-out rather than leaving the question open by omission), and the
