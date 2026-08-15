@@ -14,6 +14,36 @@ Format:
 
 ---
 
+## 2026-08-15 — `SPEC.md` §13 Q1 resolved: topology *editing* is admin-only, *viewing* is not
+**Decision:** `services.py`'s `import_topology` service (a full-topology overwrite, reachable via
+Developer Tools or an automation, not just the panel) now requires the calling user to be an admin,
+raising `homeassistant.exceptions.Unauthorized` otherwise. `export_topology` (read-only) stays open
+to any authenticated user. This makes the policy consistent across every topology-mutation path:
+the panel (`panel.py`, `require_admin=True`), the websocket save command (`websocket_api.py`'s
+`websocket_save_topology`, already `@require_admin`), and now the plain service. The per-room manual
+occupant-count override (`sensor.py`'s `set_occupant_count`, an *entity* service) is deliberately left
+at HA's normal per-entity control permission, not admin — it's an operational action scoped to one
+sensor a non-admin user may legitimately be allowed to control, not a structural change to the whole
+house's topology.
+**Why:** Resolves `SPEC.md` §13 Q1 ("should topology editing be restricted to admin users, or open to
+any user who can access integration configuration?"), open since before Phase 7. Investigating it
+surfaced a real, previously-undiscovered gap: the panel and websocket-save were already admin-gated,
+but `import_topology` — an equally destructive action — was not, so a non-admin household member
+could bypass the panel's restriction entirely by calling the service directly. `helpers.service.
+verify_domain_control` was considered and rejected: it checks per-entity domain *control* permission,
+not true admin status, and is deprecated for removal in HA 2026.10 (about two months out) — verified
+by reading `helpers/service.py`'s actual source (`.venv-wsl`'s installed `homeassistant` package), not
+assumed. The fix instead mirrors that same decorator's own internal admin-lookup pattern
+(`hass.auth.async_get_user(call.context.user_id)` + `user.is_admin`) directly, without the deprecated
+wrapper. Two new tests (`test_import_topology_rejects_non_admin_caller`,
+`test_import_topology_allows_admin_caller`, using pytest-homeassistant-custom-component's
+`hass_read_only_user`/`hass_admin_user` fixtures) cover both sides. 164 tests passing (was 162),
+`ruff`/`ruff format --check`/`mypy` all clean.
+**Alternatives considered:** Leaving `import_topology` ungated on the theory that anyone with access
+to call HA services already has meaningful access — rejected because it directly contradicts the
+already-shipped, deliberate `require_admin` on the panel and websocket path; the service was simply an
+overlooked bypass of that existing policy, not a considered exception to it.
+
 ## 2026-08-15 — MIT license added; CI's manifest key order and HACS repo-metadata gate resolved
 **Decision:** Added a root `LICENSE` file (MIT, copyright `yme207`), resolving `SPEC.md` §13 open
 question 3 in favor of a permissive license — the norm for HACS community integrations, with no

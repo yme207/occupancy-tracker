@@ -931,13 +931,28 @@ review, not a gate on custom-repository (add-by-URL) installs — this project's
 distribution path — so it's now tracked as a known, non-blocking CI gap rather than chased further
 without new evidence. See `docs/DECISIONS.md`'s two 2026-08-15 follow-ups for the full trace.
 
+**Sixth** (still 2026-08-15): with CI settled, the project owner picked `SPEC.md` §13 Q1 (multi-user
+admin-gating) as the next focus. Investigating it surfaced a real gap, not just an open question: the
+topology panel and the websocket save command were already `require_admin`-gated, but the plain
+`import_topology` service — an equally destructive full-topology overwrite, reachable via Developer
+Tools or an automation — had no such check, letting a non-admin household member bypass the panel's
+restriction entirely. Fixed directly (not via the deprecated `helpers.service.verify_domain_control`,
+verified from the actual installed HA source to be scheduled for removal in 2026.10 and not even the
+right check — it gates per-entity domain control, not admin status). Two new tests cover both sides.
+164 tests passing (was 162), `ruff`/`ruff format --check`/`mypy` all clean. See `docs/DECISIONS.md`'s
+new 2026-08-15 "`SPEC.md` §13 Q1 resolved" entry. **Not yet committed.**
+
 Remaining, not blocking either half of this session's work:
 
 1. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
    evidence or when actually pursuing HACS default-repository submission.
 2. A first real end-to-end smoke test against actual house sensors, not just `input_boolean`
    fixtures — never tried yet, worth doing before calling Phase 8 done.
-3. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
+3. `SPEC.md` §13's remaining two open questions: backup/restore's v1-vs-later status (arguably
+   already resolved in practice — `export_topology`/`import_topology` already exist — worth a
+   deliberate "yes, that's it" close-out rather than leaving the question open by omission), and the
+   HACS default-repository-vs-custom-repository submission-bar decision.
+4. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
    a long-lived access token consistently failed HA's own auth validation for a reason not fully
    root-caused (ruled out: IP ban, `local_only` restriction, storage-write timing, token/id mismatch —
    all checked against real source or real storage, not guessed). Not pursued further because the

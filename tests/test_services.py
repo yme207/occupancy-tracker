@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import pytest
 import voluptuous as vol
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
 from custom_components.occupancy_tracker.const import DOMAIN
 from custom_components.occupancy_tracker.topology_store import (
@@ -166,3 +166,53 @@ async def test_import_topology_rejects_unknown_area_reference(
         )
 
     assert entry.runtime_data.topology_store.topology.connectors == ()
+
+
+async def test_import_topology_rejects_non_admin_caller(
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    enable_custom_integrations: None,
+    hass_read_only_user: MockUser,
+) -> None:
+    """Matches the topology panel/websocket-save's own `require_admin` gate
+    (SPEC.md §13 Q1) — a non-admin user must not be able to overwrite the
+    whole topology by calling the service directly, bypassing the panel.
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    hallway = area_registry.async_get_or_create("Hallway")
+    entry = await _setup_entry(hass)
+    topology = TopologyData(connectors=(Connector("c1", kitchen.id, hallway.id),))
+
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN,
+            "import_topology",
+            {"topology": topology_to_dict(topology)},
+            blocking=True,
+            context=Context(user_id=hass_read_only_user.id),
+        )
+
+    assert entry.runtime_data.topology_store.topology.connectors == ()
+
+
+async def test_import_topology_allows_admin_caller(
+    hass: HomeAssistant,
+    area_registry: ar.AreaRegistry,
+    enable_custom_integrations: None,
+    hass_admin_user: MockUser,
+) -> None:
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    hallway = area_registry.async_get_or_create("Hallway")
+    entry = await _setup_entry(hass)
+    topology = TopologyData(connectors=(Connector("c1", kitchen.id, hallway.id),))
+
+    await hass.services.async_call(
+        DOMAIN,
+        "import_topology",
+        {"topology": topology_to_dict(topology)},
+        blocking=True,
+        context=Context(user_id=hass_admin_user.id),
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.topology_store.topology.connectors == topology.connectors

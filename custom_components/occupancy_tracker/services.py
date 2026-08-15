@@ -21,7 +21,7 @@ from homeassistant.core import (
     SupportsResponse,
     callback,
 )
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.helpers import selector
 
 from .const import DOMAIN
@@ -55,6 +55,28 @@ def _get_loaded_entry(hass: HomeAssistant) -> OccupancyTrackerConfigEntry:
     return loaded[0]
 
 
+async def _async_require_admin(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Restrict a service to admin users, matching the topology editor's own gate.
+
+    The topology panel (`panel.py`, `require_admin=True`) and the websocket
+    save command (`websocket_api.py`'s `websocket_save_topology`, `@require_admin`)
+    already restrict topology *editing* to admins. `import_topology` is an
+    equally destructive full-topology overwrite reachable outside the panel
+    (Developer Tools, an automation), so it needs the same gate directly —
+    `helpers.service.verify_domain_control` doesn't fit (it checks per-entity
+    domain control, not admin status, and is deprecated for removal in HA
+    2026.10 anyway), so this mirrors its own internal admin-lookup pattern
+    instead. A call with no `user_id` (e.g. from an automation triggered by
+    the system itself, not a person) is left unrestricted, same as HA core's
+    own equivalent checks treat that case.
+    """
+    if not call.context.user_id:
+        return
+    user = await hass.auth.async_get_user(call.context.user_id)
+    if user is not None and not user.is_admin:
+        raise Unauthorized(context=call.context)
+
+
 @callback
 def async_setup(hass: HomeAssistant) -> None:
     """Register the topology export/import services.
@@ -76,6 +98,7 @@ def async_setup(hass: HomeAssistant) -> None:
         return cast(ServiceResponse, {"topology": topology})
 
     async def _async_import_topology(call: ServiceCall) -> ServiceResponse:
+        await _async_require_admin(hass, call)
         entry = _get_loaded_entry(hass)
         try:
             topology = topology_from_dict(call.data["topology"])

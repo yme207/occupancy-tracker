@@ -422,14 +422,16 @@ directly). Resolved:
 - **Near-house zones for pre-arming (§6.7)** are explicitly user-picked in the options flow, not
   auto-detected by proximity. See `docs/DECISIONS.md` 2026-08-08 "Near-house zones are
   user-picked."
+- **Multi-user HA installs**: topology *editing* (the panel, the websocket save command, and the
+  `import_topology` service) requires an admin user; topology *viewing* (the panel's read side, the
+  websocket get command, `export_topology`) is open to any authenticated user. See
+  `docs/DECISIONS.md` 2026-08-15 "`SPEC.md` §13 Q1 resolved."
 
 Still open — product/design-level, none block Phase 0–3:
 
-1. **Multi-user HA installs** — should topology editing be restricted to admin users, or open to
-   any user who can access integration configuration? (before Phase 7)
-2. **Backup/restore** — is exporting/importing topology (mentioned in §8 services) a v1 requirement
+1. **Backup/restore** — is exporting/importing topology (mentioned in §8 services) a v1 requirement
    or a later addition? (before Phase 8)
-3. **HACS submission bar** — are we building toward the full HACS default-repository review
+2. **HACS submission bar** — are we building toward the full HACS default-repository review
    (code owners, brand assets, quality scale) from the start, or shipping as a custom-repository
    HACS install first and formalizing later? (before Phase 8) **Partially resolved 2026-08-15:**
    license chosen (MIT, root `LICENSE` added — required by `hacs`'s `check-license` regardless of
