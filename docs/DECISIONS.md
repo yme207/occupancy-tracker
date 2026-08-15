@@ -35,6 +35,22 @@ expected to resolve alongside the ordering fix; confirm on the next CI run befor
 **Alternatives considered:** Apache-2.0 — considered, but MIT is more standard for this integration's
 category and audience; the project owner chose MIT directly.
 
+**2026-08-15 follow-up:** The project owner pasted the next Actions run: `hassfest` and `lint-and-test`
+both went green (confirming the key-order fix), and `hacs`'s `check-license` cleared (confirming the
+`LICENSE` fix, 5/8 → 4/8 checks failed). `check-manifest`/`hacsjson` ("expected a dictionary. Got
+None") is still failing, unaffected by either fix — so that error was never actually caused by the
+key-order bug, despite the plausible-looking upstream report this entry originally cited. Re-searched
+and found the exact match: `hacs/integration` issue #5252, same error on an equally minimal
+`hacs.json`, closed by the reporter two days after filing with "It appears to be working again" and no
+maintainer-identified root cause — a real, previously-documented intermittent flake in HACS's own
+validation service, not a defect in this repo's files. Added `github_token:
+${{ secrets.GITHUB_TOKEN }}` explicitly to `.github/workflows/ci.yml`'s `hacs` job as a cheap,
+non-destructive belt-and-braces change (the action's own default is already `${{ github.token }}`, so
+this may not change anything, but a couple of HACS's own past fixes were specifically about
+token/ref handling in this exact manifest-fetch path). `check-repository`'s missing description/topics
+remain, unchanged — still a GitHub repo-settings action for the project owner, not a file this repo
+controls.
+
 ## 2026-08-15 — `_plausible_transit_source` now searches multi-hop, nearest-candidate-first, through empty Areas
 **Decision:** `occupancy_engine.py`'s `_plausible_transit_source` no longer only checks an Area's
 *direct* Connector-adjacent neighbors. It now does a breadth-first search outward through any chain of

@@ -911,10 +911,20 @@ crashing the hacs action's internal validation rather than a real problem with `
 contents — **not yet confirmed fixed, check the next CI run** before assuming it's resolved. See
 `docs/DECISIONS.md`'s new 2026-08-15 "MIT license added..." entry.
 
+**Fourth** (still 2026-08-15): the project owner pasted the resulting Actions run. `hassfest` and
+`lint-and-test` are now green, and `hacs`'s `check-license` cleared too (5/8 → 4/8 checks failed) —
+both fixes confirmed. Still failing: `check-manifest`/`hacsjson` ("expected a dictionary. Got None")
+and `check-repository`'s description/topics. The manifest error turned out unrelated to the key-order
+bug (see `docs/DECISIONS.md`'s 2026-08-15 follow-up) — matched to a documented, self-resolving
+upstream HACS flake (`hacs/integration` #5252), not a defect here. Added an explicit `github_token`
+input to the `hacs` job in `.github/workflows/ci.yml` as a low-cost, non-destructive attempt, but the
+honest expectation is this may just need a re-run or a wait, not a further code change.
+
 Remaining, not blocking either half of this session's work:
 
-1. **Confirm the next CI run is fully green**, specifically the `hacs` job's `check-manifest` step —
-   the key-order fix is a strong hypothesis, not a confirmed fix, for that specific error.
+1. **Confirm a later CI run clears `check-manifest`** — if it's still red after a re-run/re-push with
+   no further repo changes, that's strong confirmation it's the upstream HACS flake, not this repo;
+   no further local fix should be attempted without new evidence.
 2. Set the GitHub repo's description and topics (Settings → General / the sidebar "About" gear on
    the repo page) — required for `hacs`'s `check-repository` to pass; no tool in this environment can
    set them.
