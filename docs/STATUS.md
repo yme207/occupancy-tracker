@@ -974,20 +974,44 @@ where the physical panel sits) rather than the doors' actual rooms — resolved 
 change needed. Added a live Total Occupancy/pending-transits readout and per-room quality-color node
 rings to the topology panel's main graph page (previously only visible per-room via a click-through)
 for live walk-the-house debugging — see `docs/DECISIONS.md`'s new entry; JS-only, no automated test,
-verify visually in-browser.
+verify visually in-browser. A follow-up fix landed minutes later: the new quality-colored node ring
+(and the detail panel's quality chip) showed a room with zero occupants and no evidence at all as
+LATCHED/"Probably occupied" — `_quality_for` only tracks freshness, not whether the count is actually
+nonzero — fixed at the presentation layer only, engine's three-tier contract untouched.
+
+**Ninth** (still 2026-08-15): the real-sensor walk-test itself found a real, structural problem — see
+`docs/DECISIONS.md`'s new **"[OPEN, needs design work]"** entry for the full findings. Ground truth
+was 1 person; the panel showed `Total Occupant Count` of 2 twice, in each case because a multi-hop
+transit (`stairs`→`lounge`, 2 hops; `kitchen`→`office`, 4 hops) exceeded the flat 90-second
+`transit_confirmation_window` and fell back to "new occupant" instead of correctly draining the
+source room — plus, because SPEC.md §6.2's latching model deliberately never auto-decays a count,
+that phantom occupant then never self-corrects. The project owner explicitly wants this treated as a
+real rework of the transit-timing model, not a quick tune — candidate directions are recorded in
+`docs/DECISIONS.md` but nothing is implemented yet. **This is now the top-priority next-session item**,
+ahead of everything below.
+
+Also raised, not yet resolved: `Total Occupant Count` currently includes any Area the user tracks,
+with no distinction for an Area that's actually outdoors (e.g. `front_yard`/`back_yard`, real Areas
+kept in the graph on purpose to correctly handle "lingered outside before using the door") — so
+tracking yard motion as evidence inflates the whole-house total. No code change made; the
+project owner was given two options (don't select evidence entities for outdoor Areas at all, vs. a
+real "this Area is outside" flag excluded from the total) and hasn't yet said which they want.
 
 Remaining, not blocking either half of this session's work:
 
-1. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
+1. **Transit-timing rework (see "Ninth" above)** — the real next priority; needs a design
+   conversation before implementation, not a quick patch.
+2. **Outdoor-Area-vs-total-occupancy decision** (see "Ninth" above) — needs the project owner's choice
+   between the two options presented.
+3. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
    evidence or when actually pursuing HACS default-repository submission.
-2. **The real-sensor smoke test is now actively underway** — first real test of everything built so
-   far against sensors this project has never seen before; expect more real-hardware wrinkles like the
-   Konnected one above as it continues.
-3. `SPEC.md` §13's remaining two open questions: backup/restore's v1-vs-later status (arguably
+4. **The real-sensor smoke test continues** — expect more real-hardware wrinkles like the Konnected
+   one above and the two findings in this entry as it continues.
+5. `SPEC.md` §13's remaining two open questions: backup/restore's v1-vs-later status (arguably
    already resolved in practice — `export_topology`/`import_topology` already exist — worth a
    deliberate "yes, that's it" close-out rather than leaving the question open by omission), and the
    HACS default-repository-vs-custom-repository submission-bar decision.
-4. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
+6. **Live entity-triggering/monitoring via the dev instance's REST/WebSocket API remains unresolved** —
    a long-lived access token consistently failed HA's own auth validation for a reason not fully
    root-caused (ruled out: IP ban, `local_only` restriction, storage-write timing, token/id mismatch —
    all checked against real source or real storage, not guessed). Not pursued further because the

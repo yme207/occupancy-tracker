@@ -14,6 +14,66 @@ Format:
 
 ---
 
+## 2026-08-15 — [OPEN, needs design work] Real-house walk-test: transit inference needs a rework,
+## not a tuning tweak
+**Status:** Not fixed. Findings and candidate directions recorded here for a deliberate design
+session, per the project owner's explicit call ("I think it will need a rework") rather than a quick
+patch during live testing.
+
+**What was observed:** Walking the project owner's real house (single person, ground truth = always
+1 occupant) produced a `Total Occupant Count` of 2 on two separate occasions: (1) after
+`stairs` → `lounge` (`stairs` stayed latched at 1, `lounge` separately became 1 — a genuinely new
+occupant, not a moved one); (2) after `kitchen` → (via `hallway`/`stairs`/`landing`) → `office`
+(`kitchen` stayed latched at 1, `office` separately became 1). In both cases the *destination* room's
+arrival signal fired but `_plausible_transit_source` found no plausible source, so
+`_handle_area_activity` fell through to its "no Connector-adjacent Area plausibly explains this —
+new-occupant evidence" branch (`occupancy_engine.py`) instead of correctly draining the room the
+person actually walked from.
+
+**Root cause (two compounding structural issues, not a single bug):**
+1. **A flat `transit_confirmation_window` (default 90s) doesn't scale with hop count or real
+   walking time.** Both failing routes are multi-hop (`lounge` is two hops from `stairs` via the
+   sensor-less `hallway`; `office` is four hops from `kitchen` via
+   `hallway`/`stairs`/`landing`) — `docs/DECISIONS.md`'s 2026-08-15 nearest-first BFS entry already
+   flagged this exact risk under "Alternatives considered": *"Scaling the effective timing window by
+   hop count... a real alternative worth keeping in mind if nearest-first turns out to be insufficient
+   in practice, not implemented since nearest-first already resolves every scenario tested this
+   session."* Every scripted scenario used short, precisely-chosen synthetic timings; a real, unhurried
+   multi-room walk — plus real PIR/mmWave sensor detection latency stacked on top of actual walking
+   time — routinely exceeds a single flat 90-second budget for anything more than 1-2 hops. This is
+   exactly the predicted failure mode, now confirmed in practice, not a new class of bug.
+2. **Once a phantom occupant is created, nothing ever corrects it — errors only accumulate, never
+   self-heal.** SPEC.md §6.2 is explicit and deliberate: *"Absence of signal never decays it — a room
+   only empties when there's positive evidence of an exit."* This is correct and must not be casually
+   reversed — it's exactly what makes a stationary, silent occupant (asleep, working at a desk for
+   hours) representable at all, and the project's own 2026-08-08 "latch, not decay" decision rejected
+   time-based decay for good reason. But it also means a *missed* transit window doesn't just cause a
+   momentary blip — it permanently strands a phantom occupant in the room they left, with no
+   mechanism to ever clear itself short of a fresh confirmed departure signal from that exact room or
+   a manual `set_occupant_count` override. Over real daily use, with many transits and no window ever
+   being large enough to guarantee 100% capture, `Total Occupant Count` will drift upward
+   indefinitely rather than self-correct — the timing-window issue above determines *how often* this
+   happens, but the lack of any self-correction is what makes each occurrence permanent.
+
+**Candidate directions for the rework (not decided, needs the project owner's input on trade-offs):**
+- Scale the effective timing budget by hop count/distance instead of one flat window — the
+  previously-considered, not-yet-implemented fix from the BFS entry above. Needs a principled way to
+  choose the per-hop increment for an unknown house size/sensor mix.
+- Per-connector (not just global) tunable windows, since a real hallway-to-lounge walk and a
+  four-room traverse plausibly need different budgets, and one global number can't fit both.
+- Surface likely-phantom latched rooms to the user for review rather than auto-clearing them — e.g.
+  flag a room that's been LATCHED (not CONFIRMED) for an unusually long time, especially if it makes
+  `Total Occupant Count` implausible relative to the household-size hint, as a candidate to manually
+  correct — this stays consistent with the "never auto-decay" rule (nothing changes automatically)
+  while still giving the user a way to notice and fix drift instead of it being invisible.
+- Any fix here must **not** reintroduce time-based auto-clearing of a room's count — that's the
+  exact thing the 2026-08-08 latch-not-decay decision already rejected, for reasons that still hold.
+**Why:** Recorded rather than immediately patched because the project owner explicitly wants this
+treated as a real rework, not a tuning tweak — this is the core inference algorithm, and getting the
+trade-off between "confirms real transits promptly" and "doesn't fabricate phantom occupants on a
+real, imperfectly-timed house" wrong in either direction has real consequences for a system meant to
+run unattended.
+
 ## 2026-08-15 — LATCHED-with-zero-occupants no longer displayed as "probably occupied"
 **Decision:** `topology-panel.js` no longer colors a room node's ring (or labels the detail panel's
 quality chip) as LATCHED when that Area's `occupant_count` is 0 — it falls back to the plain default
