@@ -976,12 +976,26 @@ class OccupancyTrackerTopologyPanel extends LitElement {
           const selected = area.area_id === this._selectedAreaId;
           const isConnectSource = area.area_id === this._connectSourceAreaId;
           const isActive = this._isAreaActive(area.area_id);
+          const state = isActive ? this._engineState?.areas?.[area.area_id] : null;
           // Quality (SPEC.md §6.8: confirmed/latched/ambiguous) as a ring
           // color, readable at a glance while walking the house — same
           // colors as the detail panel's own quality chip (chip--confirmed
           // etc.), just applied to the node's stroke instead of a dot, so
           // there's nothing new to learn between the two views.
-          const quality = isActive ? this._engineState?.areas?.[area.area_id]?.quality : null;
+          //
+          // LATCHED only means "not fresh, but the last real evidence
+          // stands" (SPEC.md §6.2) — the engine's quality tier tracks
+          // freshness only, not the count's sign, so a room that's never had
+          // any evidence at all (occupant_count 0, never confirmed) also
+          // reports LATCHED, identically to a room latched *occupied*.
+          // Coloring both the same muted gray erases the plain "this room
+          // is tracked" signal a fresh, still-empty room used to show (the
+          // default ring color) and reads as "probably occupied" for a room
+          // that's actually empty. Only color the ring by quality once
+          // there's an actual occupant it's describing.
+          const quality = state && (state.quality !== "LATCHED" || state.occupant_count > 0)
+            ? state.quality
+            : null;
           const classes = [
             "node",
             isEgress ? "node--egress" : "",
@@ -1033,7 +1047,14 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       (t) => t.area_id_a === area.area_id || t.area_id_b === area.area_id
     );
     const qualityKey = state.quality.toLowerCase();
-    const qualityLabel = QUALITY_LABELS[state.quality] ?? state.quality;
+    // LATCHED with zero occupants means "empty, and not fresh evidence of
+    // that either" — not "probably occupied" (see _renderGraph's identical
+    // reasoning for the node ring color; same underlying quirk of the
+    // engine's quality tier, fixed the same way here).
+    const qualityLabel =
+      state.quality === "LATCHED" && state.occupant_count === 0
+        ? "Not occupied"
+        : (QUALITY_LABELS[state.quality] ?? state.quality);
 
     return html`
       <div class="explain">

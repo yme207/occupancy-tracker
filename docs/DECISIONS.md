@@ -14,6 +14,29 @@ Format:
 
 ---
 
+## 2026-08-15 — LATCHED-with-zero-occupants no longer displayed as "probably occupied"
+**Decision:** `topology-panel.js` no longer colors a room node's ring (or labels the detail panel's
+quality chip) as LATCHED when that Area's `occupant_count` is 0 — it falls back to the plain default
+ring / a "Not occupied" label instead. `occupancy_engine.py`'s actual `StateQuality` enum and
+`_quality_for` logic are untouched — SPEC.md §6.8 defines exactly three tiers, and this is a
+presentation-layer fix, not a change to that contract.
+**Why:** Found live, on the project owner's real house, within minutes of the previous entry's
+live-stats change shipping: `_quality_for` only tracks *freshness* of the last confirmation, never
+whether the current count is actually nonzero — so a room that's never had any evidence at all
+(`last_confirmed is None`, `occupant_count == 0`) reports LATCHED identically to a room that's
+genuinely latched *occupied*. Two visible symptoms, same root cause: (1) the new quality-colored node
+ring (previous entry) replaced every fresh, still-empty tracked room's plain "this room is tracked"
+ring color with the same muted gray as an untracked room, since LATCHED-by-default is the near-universal
+starting state — the project owner had been reading that plain ring color as "has evidence selected"
+and its disappearance read as a regression; (2) the detail panel showed "Probably occupied" directly
+next to "0 occupants" for the Office after its count cleared — a direct, confusing contradiction in
+wording. Confirmed and AMBIGUOUS tiers don't have this problem (neither's label/color inherently
+claims occupancy in a way a 0 count would contradict), so only LATCHED needed the count-aware guard.
+**Alternatives considered:** Adding a fourth `StateQuality` tier (e.g. `UNOBSERVED`) to the engine
+itself — rejected for this pass as a larger, SPEC-contract-affecting change that deserves the project
+owner's explicit sign-off rather than being folded into an urgent live-testing fix; the presentation-
+layer guard fixes both visible symptoms without touching `SPEC.md`'s three-tier definition.
+
 ## 2026-08-15 — Live Total Occupancy/quality surfaced on the main graph page, not just per-room
 **Decision:** The topology panel's "Areas & connections" page now shows a live Total Occupancy
 count and a pending-transits count in the card header, and colors each room node's ring by its
