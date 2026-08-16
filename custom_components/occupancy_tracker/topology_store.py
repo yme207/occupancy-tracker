@@ -28,10 +28,20 @@ _LOGGER = logging.getLogger(__name__)
 # migration hook is where old data gets upgraded to match. 1.1 -> 1.2 added
 # area_positions (manual node layout for the topology editor panel). 1.2 ->
 # 1.3 added outside_position (manual position for the synthesized "Outside"
-# node the panel draws once at least one egress point exists).
+# node the panel draws once at least one egress point exists). 1.3 -> 1.4
+# added area_kind_overrides (manual room-vs-transit override, docs/DECISIONS.md's
+# "area-kind classification" entry). 1.4 -> 1.5 added outside_area_ids
+# (flags a genuinely-outdoor Area excluded from the whole-house total,
+# docs/DECISIONS.md's "outdoor Areas excluded from the total" entry).
 STORAGE_VERSION_MAJOR = 1
-STORAGE_VERSION_MINOR = 3
+STORAGE_VERSION_MINOR = 5
 _STORAGE_KEY_PREFIX = "occupancy_tracker_topology"
+
+#: The only valid `area_kind_overrides` values — plain strings, not
+#: `occupancy_engine.AreaKind` itself (this module must stay HA-dependent-but-
+#: engine-independent, `engine_adapter.py` is the one place that bridges the
+#: two, docs/ARCHITECTURE.md's layering rule).
+AREA_KIND_OVERRIDE_VALUES = ("room", "transit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +81,19 @@ class TopologyData:
     #: should fall back to its own computed default. Purely a display
     #: concern, like `area_positions` — never read by the engine.
     outside_position: tuple[float, float] | None = None
+    #: Manual override of an Area's inferred `AreaKind` (room vs. transit,
+    #: docs/DECISIONS.md's "area-kind classification" entry) — one of
+    #: `AREA_KIND_OVERRIDE_VALUES`. An Area absent here uses
+    #: `engine_adapter.py`'s topology-shape inference instead. Unlike
+    #: `area_positions`, this *is* engine-relevant — it changes transit-timing
+    #: behavior, not just display.
+    area_kind_overrides: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    #: Areas the user has flagged as genuinely outdoors (e.g. a front/back
+    #: yard) — excluded from `sensor.total_occupant_count` while staying
+    #: fully tracked by the engine otherwise (docs/DECISIONS.md). Like
+    #: `area_kind_overrides`, this *is* engine-relevant (changes what the
+    #: total sums), not a display-only concern.
+    outside_area_ids: frozenset[str] = frozenset()
 
 
 class ConnectorDict(TypedDict):
@@ -95,6 +118,8 @@ class TopologyDict(TypedDict):
     area_entity_selections: dict[str, list[str]]
     area_positions: dict[str, PositionDict]
     outside_position: PositionDict | None
+    area_kind_overrides: dict[str, str]
+    outside_area_ids: list[str]
 
 
 def topology_to_dict(topology: TopologyData) -> TopologyDict:
@@ -129,6 +154,8 @@ def topology_to_dict(topology: TopologyData) -> TopologyDict:
             if topology.outside_position is not None
             else None
         ),
+        "area_kind_overrides": dict(topology.area_kind_overrides),
+        "outside_area_ids": sorted(topology.outside_area_ids),
     }
 
 
@@ -164,6 +191,8 @@ def topology_from_dict(data: TopologyDict) -> TopologyData:
             if data["outside_position"] is not None
             else None
         ),
+        area_kind_overrides=MappingProxyType(dict(data["area_kind_overrides"])),
+        outside_area_ids=frozenset(data["outside_area_ids"]),
     )
 
 
@@ -196,6 +225,16 @@ class _TopologyStorageStore(Store[TopologyDict]):
             # placed "Outside" node, so None (fall back to the panel's
             # computed default) is the correct default, not a guess.
             old_data.setdefault("outside_position", None)
+        if old_major_version == 1 and old_minor_version < 4:
+            # 1.4 added area_kind_overrides; older data never had any manual
+            # room-vs-transit override, so an empty map (fall back entirely
+            # to topology-shape inference) is the correct default.
+            old_data.setdefault("area_kind_overrides", {})
+        if old_major_version == 1 and old_minor_version < 5:
+            # 1.5 added outside_area_ids; older data never flagged any Area
+            # as outdoors, so an empty list (nothing excluded from the total)
+            # is the correct default.
+            old_data.setdefault("outside_area_ids", [])
         return old_data  # type: ignore[return-value]
 
 
@@ -303,12 +342,32 @@ class TopologyStore:
                 continue
             area_positions[area_id] = position
 
+        area_kind_overrides: dict[str, str] = {}
+        for area_id, kind in current.area_kind_overrides.items():
+            if area_id not in house_shape.areas:
+                removed.append(
+                    f"Area-kind override for area {area_id} removed: area no longer exists"
+                )
+                continue
+            area_kind_overrides[area_id] = kind
+
+        outside_area_ids: set[str] = set()
+        for area_id in current.outside_area_ids:
+            if area_id not in house_shape.areas:
+                removed.append(
+                    f"Outdoor-Area flag for area {area_id} removed: area no longer exists"
+                )
+                continue
+            outside_area_ids.add(area_id)
+
         cleaned = TopologyData(
             connectors=tuple(connectors),
             egress_points=tuple(egress_points),
             area_entity_selections=MappingProxyType(area_entity_selections),
             area_positions=MappingProxyType(area_positions),
             outside_position=current.outside_position,
+            area_kind_overrides=MappingProxyType(area_kind_overrides),
+            outside_area_ids=frozenset(outside_area_ids),
         )
         return cleaned, removed
 
@@ -402,6 +461,19 @@ def validate_topology(topology: TopologyData, house_shape: HouseShape) -> list[s
         if area_id not in house_shape.areas:
             errors.append(f"Node position references unknown area {area_id}")
 
+    for area_id, kind in topology.area_kind_overrides.items():
+        if area_id not in house_shape.areas:
+            errors.append(f"Area-kind override references unknown area {area_id}")
+        if kind not in AREA_KIND_OVERRIDE_VALUES:
+            errors.append(
+                f"Area-kind override for area {area_id} has invalid value {kind!r} "
+                f"(must be one of {AREA_KIND_OVERRIDE_VALUES})"
+            )
+
+    for area_id in topology.outside_area_ids:
+        if area_id not in house_shape.areas:
+            errors.append(f"Outdoor-Area flag references unknown area {area_id}")
+
     return errors
 
 
@@ -428,6 +500,12 @@ async def async_replace_topology(
         topology.connectors != previous.connectors
         or topology.egress_points != previous.egress_points
         or dict(topology.area_entity_selections) != dict(previous.area_entity_selections)
+        # Unlike area_positions/outside_position (pure display), an area-kind
+        # override changes transit-timing behavior (docs/DECISIONS.md), so it
+        # needs the same reload-to-take-effect treatment as the topology
+        # fields above.
+        or dict(topology.area_kind_overrides) != dict(previous.area_kind_overrides)
+        or topology.outside_area_ids != previous.outside_area_ids
     )
 
     await entry.runtime_data.topology_store.async_save(topology)

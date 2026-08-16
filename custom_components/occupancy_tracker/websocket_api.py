@@ -37,7 +37,12 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 from .occupancy_engine import OccupancyEngine
 from .registry_sync import HouseShape
-from .topology_store import async_replace_topology, topology_from_dict, topology_to_dict
+from .topology_store import (
+    AREA_KIND_OVERRIDE_VALUES,
+    async_replace_topology,
+    topology_from_dict,
+    topology_to_dict,
+)
 
 if TYPE_CHECKING:
     from . import OccupancyTrackerConfigEntry
@@ -65,6 +70,8 @@ _AREA_POSITION_SCHEMA = vol.Schema(
 )
 
 _OUTSIDE_POSITION_SCHEMA = vol.Any(None, _AREA_POSITION_SCHEMA)
+
+_AREA_KIND_OVERRIDE_SCHEMA = vol.In(AREA_KIND_OVERRIDE_VALUES)
 
 
 @callback
@@ -174,6 +181,15 @@ def _engine_state_json(engine: OccupancyEngine) -> dict[str, Any]:
                 "last_provenance": (
                     state.last_provenance.name if state.last_provenance is not None else None
                 ),
+                "needs_review": state.needs_review,
+                # Effective AreaKind (docs/DECISIONS.md's "area-kind
+                # classification" entry) — the user's manual override if one
+                # is set, else the topology-shape inference, already resolved
+                # by engine_adapter.py when the graph was built. Exposed so
+                # the topology panel's "Auto" selector can show what "Auto"
+                # currently resolves to without re-deriving the inference
+                # itself.
+                "area_kind": engine.graph.kind_of(area_id).name.lower(),
             }
             for area_id, state in engine.all_area_states(now).items()
         },
@@ -266,6 +282,8 @@ def websocket_subscribe_engine_state(
         vol.Required("area_entity_selections"): {str: [str]},
         vol.Required("area_positions"): {str: _AREA_POSITION_SCHEMA},
         vol.Required("outside_position"): _OUTSIDE_POSITION_SCHEMA,
+        vol.Required("area_kind_overrides"): {str: _AREA_KIND_OVERRIDE_SCHEMA},
+        vol.Required("outside_area_ids"): [str],
     }
 )
 @require_admin
@@ -298,6 +316,8 @@ async def websocket_save_topology(
             "area_entity_selections": msg["area_entity_selections"],
             "area_positions": msg["area_positions"],
             "outside_position": msg["outside_position"],
+            "area_kind_overrides": msg["area_kind_overrides"],
+            "outside_area_ids": msg["outside_area_ids"],
         }
     )
     errors = await async_replace_topology(hass, entry, topology)

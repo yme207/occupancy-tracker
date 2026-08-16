@@ -524,3 +524,168 @@ def test_household_size_hint_reflects_config() -> None:
     engine = OccupancyEngine(_graph(("kitchen",)), EngineConfig(household_size_hint=4))
 
     assert engine.household_size_hint == 4
+
+
+# -- Outdoor-Area total exclusion (docs/DECISIONS.md) ------------------------
+
+
+def test_total_occupant_count_excludes_outside_areas() -> None:
+    graph = HouseGraph(
+        area_ids=frozenset({"kitchen", "front_yard"}), outside_area_ids=frozenset({"front_yard"})
+    )
+    engine = OccupancyEngine(graph)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+    engine.process_signal(AreaActivitySignal("front_yard", T0, source="binary_sensor.motion"))
+
+    # Both Areas are still individually tracked...
+    assert engine.area_state("kitchen", T0).occupant_count == 1
+    assert engine.area_state("front_yard", T0).occupant_count == 1
+    # ...but only kitchen counts toward the whole-house total.
+    assert engine.total_occupant_count(T0) == 1
+
+
+def test_total_occupant_count_includes_everything_when_nothing_is_flagged_outside() -> None:
+    engine = OccupancyEngine(_graph(("kitchen", "hallway")))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    assert engine.total_occupant_count(T0) == 1
+
+
+# -- decay_grace_period property (docs/DECISIONS.md's decay entry) -----------
+
+
+def test_decay_grace_period_defaults() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    assert engine.decay_grace_period == timedelta(minutes=5)
+
+
+def test_decay_grace_period_reflects_config() -> None:
+    engine = OccupancyEngine(
+        _graph(("kitchen",)), EngineConfig(decay_grace_period=timedelta(minutes=1))
+    )
+
+    assert engine.decay_grace_period == timedelta(minutes=1)
+
+
+# -- expire_vacant_area (docs/DECISIONS.md's decay entry) --------------------
+
+
+def _decay_graph() -> HouseGraph:
+    return HouseGraph(
+        area_ids=frozenset({"landing"}), decay_eligible_area_ids=frozenset({"landing"})
+    )
+
+
+def test_expire_vacant_area_clears_a_decay_eligible_area() -> None:
+    engine = OccupancyEngine(_decay_graph())
+    engine.process_signal(AreaActivitySignal("landing", T0, source="binary_sensor.presence"))
+    assert engine.area_state("landing", T0).occupant_count == 1
+
+    later = T0 + timedelta(minutes=5)
+    engine.expire_vacant_area("landing", later)
+
+    state = engine.area_state("landing", later)
+    assert state.occupant_count == 0
+    assert state.last_confirmed == later
+
+
+def test_expire_vacant_area_is_a_noop_for_a_non_decay_eligible_area() -> None:
+    """SPEC.md §6.2's "never decay" guarantee holds for anything not
+    explicitly decay-eligible — an ordinary motion-sensor Area must never be
+    auto-cleared, even if this method is somehow called for it.
+    """
+    engine = OccupancyEngine(_graph(("kitchen",)))  # no decay_eligible_area_ids at all
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    engine.expire_vacant_area("kitchen", T0 + timedelta(minutes=5))
+
+    assert engine.area_state("kitchen", T0 + timedelta(minutes=5)).occupant_count == 1
+
+
+def test_expire_vacant_area_is_a_noop_when_already_zero() -> None:
+    graph = _decay_graph()
+    engine = OccupancyEngine(graph)
+
+    engine.expire_vacant_area("landing", T0)  # already 0 — should not error
+
+    assert engine.area_state("landing", T0).occupant_count == 0
+
+
+def test_expire_vacant_area_clears_a_pending_transit_touching_the_area() -> None:
+    connector = GraphConnector("c1", "landing", "office")
+    graph = HouseGraph(
+        area_ids=frozenset({"landing", "office"}),
+        connectors=(connector,),
+        decay_eligible_area_ids=frozenset({"landing"}),
+    )
+    engine = OccupancyEngine(graph)
+    engine.process_signal(AreaActivitySignal("landing", T0, source="binary_sensor.presence"))
+    # office is empty, landing occupied — a Connector-crossing event can
+    # resolve a direction, registering a pending transit with landing as its
+    # source (unconfirmed until office corroborates).
+    engine.process_signal(ConnectorActivitySignal("c1", T0, source="binary_sensor.landing_door"))
+    assert "c1" in engine.pending_transit_connector_ids(T0)
+
+    later = T0 + timedelta(minutes=5)
+    engine.expire_vacant_area("landing", later)
+
+    assert "c1" not in engine.pending_transit_connector_ids(later)
+    assert engine.area_state("landing", later).occupant_count == 0
+
+
+def test_expire_vacant_area_notifies_listeners() -> None:
+    graph = _decay_graph()
+    engine = OccupancyEngine(graph)
+    engine.process_signal(AreaActivitySignal("landing", T0, source="binary_sensor.presence"))
+
+    calls = 0
+
+    def on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    engine.add_listener(on_change)
+    engine.expire_vacant_area("landing", T0 + timedelta(minutes=5))
+
+    assert calls == 1
+
+
+# -- needs_review flag (docs/DECISIONS.md's decay entry) ---------------------
+
+
+def test_needs_review_false_while_fresh() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    assert engine.area_state("kitchen", T0).needs_review is False
+
+
+def test_needs_review_true_once_latched_past_the_threshold() -> None:
+    config = EngineConfig(long_latched_review_threshold=timedelta(hours=12))
+    engine = OccupancyEngine(_graph(("kitchen",)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="binary_sensor.motion"))
+
+    just_inside = T0 + timedelta(hours=11, minutes=59)
+    just_outside = T0 + timedelta(hours=12, minutes=1)
+
+    assert engine.area_state("kitchen", just_inside).needs_review is False
+    assert engine.area_state("kitchen", just_outside).needs_review is True
+
+
+def test_needs_review_false_for_a_decay_eligible_area() -> None:
+    """A decay-eligible Area relies on expire_vacant_area to self-correct —
+    it should never also get flagged for manual review.
+    """
+    graph = _decay_graph()
+    config = EngineConfig(long_latched_review_threshold=timedelta(hours=12))
+    engine = OccupancyEngine(graph, config)
+    engine.process_signal(AreaActivitySignal("landing", T0, source="binary_sensor.presence"))
+
+    assert engine.area_state("landing", T0 + timedelta(hours=24)).needs_review is False
+
+
+def test_needs_review_false_when_count_is_zero() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    assert engine.area_state("kitchen", T0 + timedelta(hours=24)).needs_review is False

@@ -20,6 +20,7 @@ from custom_components.occupancy_tracker.topology_store import (
     TopologyData,
     TopologyStore,
     active_area_ids,
+    validate_topology,
 )
 
 
@@ -40,6 +41,7 @@ def _house_shape(
             disabled=False,
             hidden=False,
             name=entity_id,
+            device_class=None,
         )
         for entity_id, area_id in (entities or {}).items()
     }
@@ -66,6 +68,8 @@ async def test_save_and_load_roundtrip(hass: HomeAssistant) -> None:
         ),
         area_positions=MappingProxyType({"area_kitchen": (12.5, -30.0)}),
         outside_position=(1.0, -50.0),
+        area_kind_overrides=MappingProxyType({"area_hallway": "transit"}),
+        outside_area_ids=frozenset({"area_kitchen"}),
     )
 
     writer = TopologyStore(hass, "entry-1")
@@ -127,6 +131,41 @@ async def test_migrate_func_defaults_outside_position_for_pre_1_3_data(
     result = await store._store._async_migrate_func(1, 2, raw)
 
     assert result["outside_position"] is None
+
+
+async def test_migrate_func_defaults_area_kind_overrides_for_pre_1_4_data(
+    hass: HomeAssistant,
+) -> None:
+    store = TopologyStore(hass, "entry-1")
+    raw = {
+        "connectors": [],
+        "egress_points": [],
+        "area_entity_selections": {},
+        "area_positions": {},
+        "outside_position": None,
+    }
+
+    result = await store._store._async_migrate_func(1, 3, raw)
+
+    assert result["area_kind_overrides"] == {}
+
+
+async def test_migrate_func_defaults_outside_area_ids_for_pre_1_5_data(
+    hass: HomeAssistant,
+) -> None:
+    store = TopologyStore(hass, "entry-1")
+    raw = {
+        "connectors": [],
+        "egress_points": [],
+        "area_entity_selections": {},
+        "area_positions": {},
+        "outside_position": None,
+        "area_kind_overrides": {},
+    }
+
+    result = await store._store._async_migrate_func(1, 4, raw)
+
+    assert result["outside_area_ids"] == []
 
 
 async def test_migrate_func_rejects_newer_major_version(hass: HomeAssistant) -> None:
@@ -237,6 +276,28 @@ async def test_reconcile_drops_node_position_for_missing_area(hass: HomeAssistan
     assert removed
 
 
+async def test_reconcile_drops_area_kind_override_for_missing_area(hass: HomeAssistant) -> None:
+    store = TopologyStore(hass, "entry-1")
+    store._topology = TopologyData(
+        area_kind_overrides=MappingProxyType({"kitchen": "room", "hallway": "transit"})
+    )
+
+    cleaned, removed = store.reconcile(_house_shape(("hallway",)))
+
+    assert cleaned.area_kind_overrides == {"hallway": "transit"}
+    assert removed
+
+
+async def test_reconcile_drops_outside_area_flag_for_missing_area(hass: HomeAssistant) -> None:
+    store = TopologyStore(hass, "entry-1")
+    store._topology = TopologyData(outside_area_ids=frozenset({"front_yard", "kitchen"}))
+
+    cleaned, removed = store.reconcile(_house_shape(("kitchen",)))
+
+    assert cleaned.outside_area_ids == frozenset({"kitchen"})
+    assert removed
+
+
 async def test_reconcile_is_a_noop_when_nothing_changed(hass: HomeAssistant) -> None:
     store = TopologyStore(hass, "entry-1")
     topology = TopologyData(connectors=(Connector("c1", "kitchen", "hallway"),))
@@ -302,3 +363,39 @@ def test_active_area_ids_unions_evidence_and_access_points() -> None:
     )
 
     assert active_area_ids(topology) == frozenset({"kitchen", "hallway"})
+
+
+def test_validate_topology_accepts_a_valid_area_kind_override() -> None:
+    topology = TopologyData(area_kind_overrides=MappingProxyType({"hallway": "transit"}))
+
+    assert validate_topology(topology, _house_shape(("hallway",))) == []
+
+
+def test_validate_topology_rejects_area_kind_override_for_unknown_area() -> None:
+    topology = TopologyData(area_kind_overrides=MappingProxyType({"hallway": "transit"}))
+
+    errors = validate_topology(topology, _house_shape(()))
+
+    assert any("hallway" in error for error in errors)
+
+
+def test_validate_topology_rejects_invalid_area_kind_override_value() -> None:
+    topology = TopologyData(area_kind_overrides=MappingProxyType({"hallway": "not-a-real-kind"}))
+
+    errors = validate_topology(topology, _house_shape(("hallway",)))
+
+    assert any("not-a-real-kind" in error for error in errors)
+
+
+def test_validate_topology_accepts_a_valid_outside_area_flag() -> None:
+    topology = TopologyData(outside_area_ids=frozenset({"front_yard"}))
+
+    assert validate_topology(topology, _house_shape(("front_yard",))) == []
+
+
+def test_validate_topology_rejects_outside_area_flag_for_unknown_area() -> None:
+    topology = TopologyData(outside_area_ids=frozenset({"front_yard"}))
+
+    errors = validate_topology(topology, _house_shape(()))
+
+    assert any("front_yard" in error for error in errors)

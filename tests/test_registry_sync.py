@@ -149,6 +149,57 @@ async def test_entity_disabled_and_hidden_flags(
     assert snapshot.hidden is True
 
 
+async def test_entity_device_class_uses_original_when_no_user_override(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    entry = entity_registry.async_get_or_create(
+        "binary_sensor",
+        "test",
+        "unique-occupancy",
+        suggested_object_id="landing_presence",
+        original_device_class="occupancy",
+    )
+
+    registry_sync = RegistrySync(hass)
+    shape = registry_sync.house_shape
+
+    assert shape.entities[entry.entity_id].device_class == "occupancy"
+
+
+async def test_entity_device_class_user_override_wins(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    entry = entity_registry.async_get_or_create(
+        "binary_sensor",
+        "test",
+        "unique-override",
+        suggested_object_id="hallway_sensor",
+        original_device_class="motion",
+    )
+    entity_registry.async_update_entity(entry.entity_id, device_class="occupancy")
+
+    registry_sync = RegistrySync(hass)
+    shape = registry_sync.house_shape
+
+    assert shape.entities[entry.entity_id].device_class == "occupancy"
+
+
+async def test_entity_with_no_device_class_is_none(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    entry = entity_registry.async_get_or_create(
+        "binary_sensor", "test", "unique-no-class", suggested_object_id="plain"
+    )
+
+    registry_sync = RegistrySync(hass)
+    shape = registry_sync.house_shape
+
+    assert shape.entities[entry.entity_id].device_class is None
+
+
 async def test_entity_name_uses_full_display_name(
     hass: HomeAssistant,
     area_registry: ar.AreaRegistry,

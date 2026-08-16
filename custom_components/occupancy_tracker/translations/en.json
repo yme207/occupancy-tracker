@@ -17,16 +17,22 @@
           "near_house_zones": "Zones that mean \"nearby, but not home yet\"",
           "household_size_hint": "How many people usually live here (optional)",
           "transit_confirmation_window": "How long to wait before deciding someone didn't move rooms",
+          "transit_area_hop_extension": "Extra time allowed for passages like hallways and stairs",
           "confirmed_freshness_window": "How long a room stays shown as \"just confirmed\"",
-          "pre_arm_window": "How long the house stays \"ready\" after someone gets close"
+          "pre_arm_window": "How long the house stays \"ready\" after someone gets close",
+          "decay_grace_period": "How long a presence sensor must stay clear before its room is marked empty",
+          "long_latched_review_threshold": "How long an unconfirmed room goes before it's flagged to double-check"
         },
         "data_description": {
           "tracked_persons": "Pick the phone or person trackers you'd like Occupancy Tracker to pay attention to. On their own, these can never place someone in a specific room — that always comes from your actual door/motion sensors. This just adds extra confidence when someone's phone agrees they're home.",
           "near_house_zones": "Pick any map zones — like a driveway or front yard — that mean someone is approaching the house but hasn't come inside yet. This is only used to get things \"ready\" a little early (see the setting below); it never counts as someone being home.",
           "household_size_hint": "Just a rough guide — leave it blank if you're not sure. It never limits how many people can actually be counted; it only makes an unusually high, unexplained number look less certain, since that would be unusual for a household this size.",
           "transit_confirmation_window": "When it looks like someone might be walking from one room to the next, this is how long it gives the next room to prove that guess right before giving up. Turn this up if people in your home often take a while getting between rooms; turn it down if you want quicker (but occasionally wrong) answers.",
+          "transit_area_hop_extension": "Rooms with no sensors of their own that mainly just connect other rooms (like a hallway or a staircase) are treated as passages automatically. Each passage someone walks through on the way to another room adds this much extra time on top of the setting above, since walking through a hallway or up a staircase genuinely takes longer than a normal room-to-room gap.",
           "confirmed_freshness_window": "After a room is confirmed occupied, it's shown as freshly \"confirmed\" for this long, then quietly switches to \"probably still occupied\" if nothing new has happened. This only changes how confident the room looks on your dashboard — it never changes whether the room is actually counted as occupied.",
-          "pre_arm_window": "Once someone enters a nearby zone (see above), the house stays \"ready\" for this long — useful if you have automations, like turning on lights, that you want to trigger a little faster right when someone actually walks in."
+          "pre_arm_window": "Once someone enters a nearby zone (see above), the house stays \"ready\" for this long — useful if you have automations, like turning on lights, that you want to trigger a little faster right when someone actually walks in.",
+          "decay_grace_period": "Only applies to rooms where every sensor selected is a true presence sensor (one built to keep sensing someone even while they're sitting still) — not an ordinary motion sensor, which naturally goes quiet after a bit even if someone's still there. Once every presence sensor in a room like that has been clear for this long, the room is automatically marked empty.",
+          "long_latched_review_threshold": "For every other room (using ordinary motion sensors), Occupancy Tracker never marks a room empty on its own — it only clears when it sees someone leave. If a room has looked occupied for longer than this with nothing new happening, it gets flagged as worth a quick check, in case it's actually empty. Nothing changes automatically; it's just a nudge."
         }
       }
     }

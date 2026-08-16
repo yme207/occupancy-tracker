@@ -43,6 +43,17 @@ const PROVENANCE_LABELS = {
   AMBIGUOUS_PHYSICAL: "a sensor picking up activity",
 };
 
+// Mirrors occupancy_engine.py's AreaKind enum, serialized lowercase by
+// websocket_api.py's _engine_state_json ("room"/"transit") — plain-language
+// labels for the per-room "how this room counts" override and its "Auto"
+// effective-kind hint. "transit" reads as "Passage" (SPEC.md §5.1's own
+// example: a hallway/stairwell people cross rather than occupy), avoiding
+// this project's own internal jargon per docs/UX_GUIDELINES.md §5.1.
+const AREA_KIND_LABELS = {
+  room: "Room",
+  transit: "Passage",
+};
+
 // binary_sensor device classes that mean "someone is physically here" (HA's
 // own device-class list — verified against developers.home-assistant.io's
 // binary_sensor entry, not guessed) — used to suggest likely occupancy
@@ -226,7 +237,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       await this._loadEngineState();
       this._subscribeEngineState();
     } catch (err) {
-      this._error = err.message || "unknown_error";
+      this._error = err.message || "Something went wrong. Try refreshing the page.";
     } finally {
       this._loading = false;
     }
@@ -463,6 +474,38 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     this._setAreaEntitySelections(areaId, next);
   }
 
+  // -- Area-kind override (room vs. passage, docs/DECISIONS.md's 2026-08-16
+  // "Area-kind classification" entry) -------------------------------------
+
+  // kind is null ("Auto" — remove the override so topology-shape inference
+  // decides), "room", or "transit" (matches topology_store.py's
+  // AREA_KIND_OVERRIDE_VALUES exactly, so this needs no translation at the
+  // save boundary).
+  _setAreaKindOverride(areaId, kind) {
+    const current = { ...(this._topology.area_kind_overrides ?? {}) };
+    if (kind) {
+      current[areaId] = kind;
+    } else {
+      delete current[areaId];
+    }
+    this._topology = { ...this._topology, area_kind_overrides: current };
+    this._saveTopology();
+  }
+
+  // -- Outdoor-area flag (docs/DECISIONS.md's 2026-08-16 "outdoor Areas
+  // excluded from the total" entry) ----------------------------------------
+
+  _setAreaOutside(areaId, isOutside) {
+    const current = new Set(this._topology.outside_area_ids ?? []);
+    if (isOutside) {
+      current.add(areaId);
+    } else {
+      current.delete(areaId);
+    }
+    this._topology = { ...this._topology, outside_area_ids: [...current] };
+    this._saveTopology();
+  }
+
   // -- Persistence ----------------------------------------------------------
 
   async _saveTopology() {
@@ -487,6 +530,8 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         // just for this — no reason to force a storage migration over a
         // field that's simply unused going forward.
         outside_position: null,
+        area_kind_overrides: this._topology.area_kind_overrides ?? {},
+        outside_area_ids: this._topology.outside_area_ids ?? [],
       });
       this._topology = result.topology;
       // A save can reload the entry (e.g. toggling an access-point entity),
@@ -702,7 +747,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         </ha-icon-button>
         <div class="titles">
           <div class="title">Occupancy Tracker</div>
-          <div class="subtitle">House topology</div>
+          <div class="subtitle">Room layout</div>
         </div>
       </div>
       <div class="content">${this._renderContent()}</div>
@@ -748,7 +793,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       <div class="layout ${this.narrow ? "layout--narrow" : ""}">
         <ha-card class="graph-card">
           <div class="card-header">
-            <h1>Areas &amp; connections</h1>
+            <h1>Rooms &amp; connections</h1>
             ${this._renderLiveStats()}
           </div>
           <p class="card-subtitle">
@@ -762,7 +807,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
               : html`<div class="empty-topology-notice">
                   <ha-icon icon="mdi:vector-line"></ha-icon>
                   <span>
-                    You haven't connected any rooms yet. Use "Draw connector" below to link two
+                    You haven't connected any rooms yet. Use "Connect rooms" below to link two
                     rooms that are next to each other, or click a room to flag it as an access
                     point (a door to outside).
                   </span>
@@ -789,7 +834,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
               @click=${() => this._toggleConnectMode()}
             >
               <ha-icon icon="mdi:link-plus"></ha-icon>
-              ${this._connectMode ? "Drawing connector…" : "Draw connector"}
+              ${this._connectMode ? "Connecting…" : "Connect rooms"}
             </button>
           </div>
           <div class="graph-wrap">${this._renderGraph()}</div>
@@ -798,8 +843,8 @@ class OccupancyTrackerTopologyPanel extends LitElement {
               ${this._connectMode
                 ? this._connectSourceAreaId
                   ? "Click another room to connect it, or press Esc to cancel."
-                  : "Click a room to start a connector, or press Esc to stop drawing."
-                : "Drag a room to move it, scroll to zoom, drag the background to pan. Hover or tap a connector, then click × to remove it."}
+                  : "Click a room to start connecting it to another one, or press Esc to stop."
+                : "Drag a room to move it, scroll to zoom, drag the background to pan. Hover or tap a connection line, then click × to remove it."}
             </p>
             ${
               hasTopology
@@ -811,13 +856,17 @@ class OccupancyTrackerTopologyPanel extends LitElement {
                       ><span class="legend-swatch legend-swatch--egress"></span>Dashed ring = this
                       room has an access point (a door to outside)</span
                     >
+                    <span class="legend-item"
+                      ><span class="legend-swatch legend-swatch--outside"></span>Dotted outer ring
+                      = this area is outside your home</span
+                    >
                     <span class="legend-item">
                       <span class="legend-dots">
                         <span class="legend-dot legend-dot--confirmed"></span>
                         <span class="legend-dot legend-dot--latched"></span>
                         <span class="legend-dot legend-dot--ambiguous"></span>
                       </span>
-                      Ring color = confirmed / latched / ambiguous
+                      Ring color = confirmed / probably occupied / checking
                     </span>
                   </div>`
                 : nothing
@@ -867,7 +916,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         ${pending
           ? html`<span class="badge badge--stat badge--pending">
               <ha-icon icon="mdi:transit-connection-variant"></ha-icon>
-              ${pending} pending transit${pending === 1 ? "" : "s"}
+              ${pending} move${pending === 1 ? "" : "s"} being confirmed
             </span>`
           : nothing}
       </div>
@@ -879,6 +928,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     const connectors = this._topology.connectors ?? [];
     const egressPoints = this._topology.egress_points ?? [];
     const egressAreaIds = new Set(egressPoints.map((e) => e.area_id));
+    const outsideAreaIds = new Set(this._topology.outside_area_ids ?? []);
     const positions = this._positions;
 
     const vb = this._viewBox;
@@ -920,7 +970,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
               class="connector ${selected ? "connector--selected" : ""}"
               tabindex="0"
               role="button"
-              aria-label="Remove connector"
+              aria-label="Remove connection"
               @keydown=${(e) => {
                 if (e.key === "Enter" || e.key === "Delete" || e.key === "Backspace") {
                   e.preventDefault();
@@ -973,6 +1023,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
           const p = positions.get(area.area_id);
           if (!p) return nothing;
           const isEgress = egressAreaIds.has(area.area_id);
+          const isOutside = outsideAreaIds.has(area.area_id);
           const selected = area.area_id === this._selectedAreaId;
           const isConnectSource = area.area_id === this._connectSourceAreaId;
           const isActive = this._isAreaActive(area.area_id);
@@ -999,6 +1050,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
           const classes = [
             "node",
             isEgress ? "node--egress" : "",
+            isOutside ? "node--outside" : "",
             selected ? "node--selected" : "",
             isConnectSource ? "node--connect-source" : "",
             isActive ? "" : "node--inactive",
@@ -1023,6 +1075,11 @@ class OccupancyTrackerTopologyPanel extends LitElement {
             >
               <circle r=${NODE_RADIUS}></circle>
               ${
+                isOutside
+                  ? svg`<circle r=${NODE_RADIUS + 5} class="outside-ring"></circle>`
+                  : nothing
+              }
+              ${
                 isActive
                   ? svg`<text class="node-count" dy="0.35em">${this._engineState?.areas?.[area.area_id]?.occupant_count ?? 0}</text>`
                   : nothing
@@ -1041,7 +1098,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
   _renderExplainability(area) {
     const state = this._engineState?.areas?.[area.area_id];
     if (!state) {
-      return html`<p class="muted">Loading current state…</p>`;
+      return html`<p class="muted">Loading what's happening in this room…</p>`;
     }
     const pendingTransit = (this._engineState.pending_transits ?? []).find(
       (t) => t.area_id_a === area.area_id || t.area_id_b === area.area_id
@@ -1076,7 +1133,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         ${pendingTransit
           ? html`<p class="explain-pending">
               <ha-icon icon="mdi:transit-connection-variant"></ha-icon>
-              Unconfirmed transit ${this._transitOtherSideLabel(pendingTransit, area.area_id)}
+              Still confirming a move ${this._transitOtherSideLabel(pendingTransit, area.area_id)}
             </p>`
           : nothing}
       </div>
@@ -1102,6 +1159,77 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     return rtf.format(Math.round(diffHours / 24), "day");
   }
 
+  // "How this room counts" (docs/DECISIONS.md's 2026-08-16 "Area-kind
+  // classification" entry) — a 3-way Auto/Room/Passage override, per the
+  // project owner's explicit choice of a 3-way selector over a plain on/off
+  // toggle. "Auto" removes the override entirely so topology-shape inference
+  // decides; the hint line shows what "Auto" currently resolves to, sourced
+  // from the same live engine-state snapshot _renderExplainability already
+  // uses (websocket_api.py's _engine_state_json exposes the *effective*
+  // kind — override-or-inferred — not just the raw override, added
+  // specifically for this control since nothing exposed it before).
+  _renderAreaKindControl(area) {
+    const override = this._topology.area_kind_overrides?.[area.area_id] ?? null;
+    const effectiveKind = this._engineState?.areas?.[area.area_id]?.area_kind;
+    return html`
+      <p class="row">
+        <ha-icon icon="mdi:transit-connection-variant"></ha-icon> How this room counts
+      </p>
+      <p class="muted">
+        A hallway or stairwell with no sensors of its own gets extra time before a slow walk
+        through it looks like a second person — a room people actually spend time in doesn't. Home
+        Assistant guesses which this is from how the room connects to others; override it here if
+        it guesses wrong.
+      </p>
+      <div class="segmented" role="group" aria-label="How this room counts">
+        ${this._renderAreaKindOption(area.area_id, null, "Auto", override)}
+        ${this._renderAreaKindOption(area.area_id, "room", "Room", override)}
+        ${this._renderAreaKindOption(area.area_id, "transit", "Passage", override)}
+      </div>
+      ${override === null && effectiveKind
+        ? html`<p class="muted area-kind-hint">
+            Currently treated as: ${AREA_KIND_LABELS[effectiveKind] ?? effectiveKind}
+          </p>`
+        : nothing}
+    `;
+  }
+
+  _renderAreaKindOption(areaId, kind, label, currentOverride) {
+    const active = currentOverride === kind;
+    return html`
+      <button
+        type="button"
+        class="tool-btn ${active ? "tool-btn--active" : ""}"
+        aria-pressed=${active ? "true" : "false"}
+        @click=${() => this._setAreaKindOverride(areaId, kind)}
+      >
+        ${label}
+      </button>
+    `;
+  }
+
+  // "This area is outside" (docs/DECISIONS.md's 2026-08-16 "outdoor Areas
+  // excluded from the total" entry) — a front/back yard is the concrete
+  // example: still fully tracked (its own count/quality, and its role in
+  // transit inference — someone lingering outside before using the door
+  // still works), just left out of the whole-house total.
+  _renderOutsideToggle(area) {
+    const isOutside = (this._topology.outside_area_ids ?? []).includes(area.area_id);
+    return html`
+      <label class="checklist-item outside-toggle">
+        <input
+          type="checkbox"
+          .checked=${isOutside}
+          @change=${(e) => this._setAreaOutside(area.area_id, e.target.checked)}
+        />
+        <span
+          >This area is outside (a yard, porch, or other outdoor space) — keep tracking it, but
+          don't count it in the house's total</span
+        >
+      </label>
+    `;
+  }
+
   _renderDetail() {
     const area = this._areaEntries().find((a) => a.area_id === this._selectedAreaId);
     if (!area) return nothing;
@@ -1115,7 +1243,7 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       : this._suggestedEvidenceEntityIds(area);
     const selectableEntityIds = this._selectableEntityIds(area);
     const unsupportedNotice = html`<p class="muted">
-      None of this room's Home Assistant entities can be used yet — only motion/contact sensors,
+      None of this room's Home Assistant devices can be used yet — only motion/contact sensors,
       switches, lights, and helpers are currently supported.
     </p>`;
 
@@ -1140,6 +1268,8 @@ class OccupancyTrackerTopologyPanel extends LitElement {
                 </div>`
           }
           ${this._renderExplainability(area)}
+          ${this._renderAreaKindControl(area)}
+          ${this._renderOutsideToggle(area)}
           <p class="row">
             <ha-icon icon=${egressPoint ? "mdi:door-open" : "mdi:door-closed"}></ha-icon>
             ${egressPoint ? "Access point" : "Not an access point"}
@@ -1374,6 +1504,16 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       border: 2px dashed var(--primary-color);
       border-radius: 50%;
     }
+    /* Mirrors .outside-ring below — a second, larger dotted halo around the
+       node itself, independent of .node--egress's dashed *main* stroke so
+       both cues can be shown at once (a yard can plausibly have its own
+       access-point sensor too). */
+    .legend-swatch--outside {
+      width: 14px;
+      height: 14px;
+      border: 1.5px dotted var(--secondary-text-color, #888);
+      border-radius: 50%;
+    }
     .legend-dots {
       display: inline-flex;
       gap: 3px;
@@ -1578,6 +1718,19 @@ class OccupancyTrackerTopologyPanel extends LitElement {
     .node--egress circle {
       stroke-dasharray: 3 2;
     }
+    /* A second, larger ring drawn around the node's own circle rather than
+       reusing its stroke (unlike .node--egress above) — an outdoor Area can
+       also plausibly be an access point (e.g. a front porch with its own
+       door sensor), so the two cues need to be able to show at once without
+       fighting over the same stroke property. */
+    .outside-ring {
+      fill: none;
+      stroke: var(--secondary-text-color, #888);
+      stroke-width: 1.5;
+      stroke-dasharray: 1 4;
+      opacity: 0.8;
+      pointer-events: none;
+    }
     /* Not tracked yet — no activity evidence and not an access point, so
        this room has no HA entities at all (project-owner feedback: an
        untouched room shouldn't get sensors, but should still look visibly
@@ -1641,6 +1794,22 @@ class OccupancyTrackerTopologyPanel extends LitElement {
       align-items: center;
       gap: 8px;
       font-weight: 500;
+    }
+    .segmented {
+      display: inline-flex;
+      gap: 4px;
+      margin: 2px 0 6px;
+    }
+    .area-kind-hint {
+      margin: 0 0 12px;
+      font-style: italic;
+    }
+    .outside-toggle {
+      margin: 2px 0 12px;
+      align-items: flex-start;
+    }
+    .outside-toggle input[type="checkbox"] {
+      margin-top: 2px;
     }
     .explain {
       margin-bottom: 12px;

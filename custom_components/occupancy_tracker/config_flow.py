@@ -25,10 +25,13 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_CONFIRMED_FRESHNESS_WINDOW,
+    CONF_DECAY_GRACE_PERIOD,
     CONF_HOUSEHOLD_SIZE_HINT,
+    CONF_LONG_LATCHED_REVIEW_THRESHOLD,
     CONF_NEAR_HOUSE_ZONES,
     CONF_PRE_ARM_WINDOW,
     CONF_TRACKED_PERSONS,
+    CONF_TRANSIT_AREA_HOP_EXTENSION,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
     DOMAIN,
 )
@@ -98,6 +101,18 @@ class OccupancyTrackerOptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_TRANSIT_CONFIRMATION_WINDOW,
                     default=options.get(CONF_TRANSIT_CONFIRMATION_WINDOW, {"seconds": 90}),
+                ): selector.DurationSelector(),
+                vol.Optional(
+                    CONF_TRANSIT_AREA_HOP_EXTENSION,
+                    default=options.get(CONF_TRANSIT_AREA_HOP_EXTENSION, {"seconds": 60}),
+                ): selector.DurationSelector(),
+                vol.Optional(
+                    CONF_DECAY_GRACE_PERIOD,
+                    default=options.get(CONF_DECAY_GRACE_PERIOD, {"minutes": 5}),
+                ): selector.DurationSelector(),
+                vol.Optional(
+                    CONF_LONG_LATCHED_REVIEW_THRESHOLD,
+                    default=options.get(CONF_LONG_LATCHED_REVIEW_THRESHOLD, {"hours": 12}),
                 ): selector.DurationSelector(),
                 vol.Optional(
                     CONF_CONFIRMED_FRESHNESS_WINDOW,

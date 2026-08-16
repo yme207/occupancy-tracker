@@ -96,6 +96,8 @@ async def test_save_topology_persists_and_reloads_the_entry(
             "area_entity_selections": {},
             "area_positions": {},
             "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": [],
         }
     )
     response = await client.receive_json()
@@ -133,6 +135,8 @@ async def test_save_topology_position_only_change_does_not_reload_the_entry(
             "area_entity_selections": {},
             "area_positions": {kitchen.id: {"x": 100.0, "y": 50.0}},
             "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": [],
         }
     )
     response = await client.receive_json()
@@ -163,6 +167,8 @@ async def test_save_topology_outside_position_only_change_does_not_reload_the_en
             "area_entity_selections": {},
             "area_positions": {},
             "outside_position": {"x": -20.0, "y": 15.0},
+            "area_kind_overrides": {},
+            "outside_area_ids": [],
         }
     )
     response = await client.receive_json()
@@ -196,6 +202,8 @@ async def test_save_topology_rejects_reference_to_unknown_area(
             "area_entity_selections": {},
             "area_positions": {},
             "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": [],
         }
     )
     response = await client.receive_json()
@@ -220,6 +228,8 @@ async def test_save_topology_rejects_position_referencing_unknown_area(
             "area_entity_selections": {},
             "area_positions": {"area.nonexistent": {"x": 0.0, "y": 0.0}},
             "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": [],
         }
     )
     response = await client.receive_json()
@@ -247,12 +257,163 @@ async def test_save_topology_requires_admin(
             "area_entity_selections": {},
             "area_positions": {},
             "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": [],
         }
     )
     response = await client.receive_json()
 
     assert response["success"] is False
     assert response["error"]["code"] == "unauthorized"
+
+
+async def test_save_topology_persists_area_kind_override_and_reloads_the_entry(
+    hass: HomeAssistant,
+    hass_ws_client,
+    area_registry: ar.AreaRegistry,
+    enable_custom_integrations: None,
+) -> None:
+    hallway = area_registry.async_get_or_create("Hallway")
+    entry = await _setup_entry(hass)
+    runtime_data_before = entry.runtime_data
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "occupancy_tracker/topology/save",
+            "entry_id": entry.entry_id,
+            "connectors": [],
+            "egress_points": [],
+            "area_entity_selections": {},
+            "area_positions": {},
+            "outside_position": None,
+            "area_kind_overrides": {hallway.id: "transit"},
+            "outside_area_ids": [],
+        }
+    )
+    response = await client.receive_json()
+    await hass.async_block_till_done()
+
+    assert response["success"] is True
+    assert entry.runtime_data.topology_store.topology.area_kind_overrides == {hallway.id: "transit"}
+    # Unlike area_positions/outside_position, an area-kind override changes
+    # transit-timing behavior — it must reload, the same as a structural
+    # topology change.
+    assert entry.runtime_data is not runtime_data_before
+
+
+async def test_save_topology_rejects_area_kind_override_referencing_unknown_area(
+    hass: HomeAssistant, hass_ws_client, enable_custom_integrations: None
+) -> None:
+    entry = await _setup_entry(hass)
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "occupancy_tracker/topology/save",
+            "entry_id": entry.entry_id,
+            "connectors": [],
+            "egress_points": [],
+            "area_entity_selections": {},
+            "area_positions": {},
+            "outside_position": None,
+            "area_kind_overrides": {"area.nonexistent": "transit"},
+            "outside_area_ids": [],
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid_format"
+    assert entry.runtime_data.topology_store.topology.area_kind_overrides == {}
+
+
+async def test_save_topology_rejects_invalid_area_kind_override_value(
+    hass: HomeAssistant,
+    hass_ws_client,
+    area_registry: ar.AreaRegistry,
+    enable_custom_integrations: None,
+) -> None:
+    hallway = area_registry.async_get_or_create("Hallway")
+    entry = await _setup_entry(hass)
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "occupancy_tracker/topology/save",
+            "entry_id": entry.entry_id,
+            "connectors": [],
+            "egress_points": [],
+            "area_entity_selections": {},
+            "area_positions": {},
+            "outside_position": None,
+            "area_kind_overrides": {hallway.id: "not-a-real-kind"},
+            "outside_area_ids": [],
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is False
+
+
+async def test_save_topology_persists_outside_area_flag_and_reloads_the_entry(
+    hass: HomeAssistant,
+    hass_ws_client,
+    area_registry: ar.AreaRegistry,
+    enable_custom_integrations: None,
+) -> None:
+    front_yard = area_registry.async_get_or_create("Front Yard")
+    entry = await _setup_entry(hass)
+    runtime_data_before = entry.runtime_data
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "occupancy_tracker/topology/save",
+            "entry_id": entry.entry_id,
+            "connectors": [],
+            "egress_points": [],
+            "area_entity_selections": {},
+            "area_positions": {},
+            "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": [front_yard.id],
+        }
+    )
+    response = await client.receive_json()
+    await hass.async_block_till_done()
+
+    assert response["success"] is True
+    assert entry.runtime_data.topology_store.topology.outside_area_ids == {front_yard.id}
+    # Excluding an Area from the whole-house total is engine-relevant, same
+    # as an area-kind override — it must reload.
+    assert entry.runtime_data is not runtime_data_before
+
+
+async def test_save_topology_rejects_outside_area_flag_referencing_unknown_area(
+    hass: HomeAssistant, hass_ws_client, enable_custom_integrations: None
+) -> None:
+    entry = await _setup_entry(hass)
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "occupancy_tracker/topology/save",
+            "entry_id": entry.entry_id,
+            "connectors": [],
+            "egress_points": [],
+            "area_entity_selections": {},
+            "area_positions": {},
+            "outside_position": None,
+            "area_kind_overrides": {},
+            "outside_area_ids": ["area.nonexistent"],
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid_format"
+    assert entry.runtime_data.topology_store.topology.outside_area_ids == frozenset()
 
 
 async def test_get_engine_state_returns_area_states_and_total(
@@ -295,6 +456,8 @@ async def test_get_engine_state_returns_area_states_and_total(
     assert area_state["quality"] == "CONFIRMED"
     assert area_state["last_provenance"] == "AMBIGUOUS_PHYSICAL"
     assert area_state["last_confirmed"] is not None
+    assert area_state["needs_review"] is False
+    assert area_state["area_kind"] == "room"
     assert response["result"]["total_occupant_count"] == 1
     assert response["result"]["pending_transits"] == []
 

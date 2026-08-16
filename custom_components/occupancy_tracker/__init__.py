@@ -27,10 +27,13 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_CONFIRMED_FRESHNESS_WINDOW,
+    CONF_DECAY_GRACE_PERIOD,
     CONF_HOUSEHOLD_SIZE_HINT,
+    CONF_LONG_LATCHED_REVIEW_THRESHOLD,
     CONF_NEAR_HOUSE_ZONES,
     CONF_PRE_ARM_WINDOW,
     CONF_TRACKED_PERSONS,
+    CONF_TRANSIT_AREA_HOP_EXTENSION,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
     DOMAIN,
 )
@@ -228,6 +231,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
             entry.options,
             CONF_CONFIRMED_FRESHNESS_WINDOW,
             default_engine_config.confirmed_freshness_window,
+        ),
+        transit_area_hop_extension=_duration_option(
+            entry.options,
+            CONF_TRANSIT_AREA_HOP_EXTENSION,
+            default_engine_config.transit_area_hop_extension,
+        ),
+        decay_grace_period=_duration_option(
+            entry.options, CONF_DECAY_GRACE_PERIOD, default_engine_config.decay_grace_period
+        ),
+        long_latched_review_threshold=_duration_option(
+            entry.options,
+            CONF_LONG_LATCHED_REVIEW_THRESHOLD,
+            default_engine_config.long_latched_review_threshold,
         ),
         household_size_hint=_household_size_hint_option(entry.options),
     )

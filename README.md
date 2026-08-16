@@ -4,34 +4,35 @@ A [Home Assistant](https://www.home-assistant.io/) custom integration that infer
 per-room occupancy from sensors and devices you already have — no dedicated people-counting
 hardware required.
 
-Rooms, floors, devices, and entities are read live from Home Assistant's own Area, Floor, Device,
-and Entity registries — nothing is re-typed or hand-maintained. The two things only you can
-provide — how your rooms connect, and where the access points to outside are — are set through a
-visual topology editor built into the integration's own configuration panel.
+Rooms, floors, devices, and sensors are read live from Home Assistant's own settings — nothing is
+re-typed or hand-maintained. The two things only you can provide — how your rooms connect to each
+other, and which doors or windows lead outside — are set through a visual room layout editor built
+into the integration's own configuration panel.
 
-**Status: functional, pre-HACS-submission.** Setup, the topology editor (rooms, connectors, access
-points, per-room entity selection), the occupancy engine, and explainability are all built and
-working end-to-end against a real Home Assistant instance. Packaging for HACS distribution
-(repository metadata, documentation, HACS validation) is still in progress — see
-[`docs/STATUS.md`](docs/STATUS.md) for the current build phase and what's left.
+**Status: functional, pre-HACS-submission.** Setup, the room layout editor (rooms, connections
+between them, access points, per-room sensor selection), the occupancy engine, and the "see why"
+detail view are all built and working end-to-end against a real Home Assistant instance. Packaging
+for HACS distribution (repository metadata, documentation, HACS validation) is still in progress —
+see [`docs/STATUS.md`](docs/STATUS.md) for the current build phase and what's left.
 
 ## What it does
 
 - **Per-room occupant count and occupied state**, plus a whole-house total, exposed as regular HA
   entities (`sensor`/`binary_sensor`) — usable in dashboards and automations like any other sensor.
-- **A visual topology editor** (Settings → Devices & Services → Occupancy Tracker → Configure, or
-  the permanent sidebar entry) for drawing which rooms connect to which, flagging access points to
-  outside, and picking which entities in each room count as occupancy evidence.
-- **Explainability, one click away**: select any room in the topology panel to see its current
-  confidence tier, last confirmed activity, and any in-progress transit reasoning — not just a
-  number with no way to see why.
-- **Companion-app / zone-presence fusion**: optionally fuse `person`/`device_tracker` zone state as
-  corroborating evidence and a pre-arm signal for automations, without ever letting zone presence
-  alone place someone in a specific room.
-- **Tunable confidence windows and an optional household-size hint**, set through the integration's
+- **A visual room layout editor** (Settings → Devices & Services → Occupancy Tracker → Configure,
+  or the permanent sidebar entry) for drawing which rooms connect to which, marking doors/windows
+  that lead outside, and picking which sensors in each room count as activity.
+- **See why, one click away**: select any room in the layout editor to see how sure it is right
+  now, when it last saw activity, and — if it thinks someone just walked in from another room —
+  what it's currently checking. Not just a number with no way to see why.
+- **Companion-app / phone-location fusion**: optionally use where your phone (or Home Assistant's
+  own person tracking) says you are as extra supporting evidence and to get the house "ready" a
+  little early, without ever letting your phone's location alone decide which room you're in.
+- **Tunable timing settings and an optional household-size hint**, set through the integration's
   options — never a YAML file to hand-edit.
-- **Services** for a manual occupant-count correction (`occupancy_tracker.set_occupant_count`) and
-  topology backup/restore (`occupancy_tracker.export_topology` / `.import_topology`).
+- **Services** for manually correcting a room's occupant count
+  (`occupancy_tracker.set_occupant_count`) and for backing up/restoring your room layout
+  (`occupancy_tracker.export_topology` / `.import_topology`).
 
 ## Installation
 
@@ -47,12 +48,12 @@ directory, restart Home Assistant, and add the integration from Settings → Dev
 ## Getting started
 
 1. Add the integration (Settings → Devices & Services → Add Integration → Occupancy Tracker). No
-   setup questions — it discovers your Areas, devices, and entities directly.
-2. Open the topology editor (Configure, or the sidebar entry) and, for each room: pick which
-   entities count as occupancy evidence, draw connectors to physically adjacent rooms, and flag any
-   room that's a boundary to outside (an access point) with its door/window sensor(s).
-3. Optionally, use Configure → Options to fuse companion-app zone presence and tune the confidence
-   windows to your household.
+   setup questions — it discovers your rooms, devices, and sensors directly.
+2. Open the room layout editor (Configure, or the sidebar entry) and, for each room: pick which
+   sensors count as activity, draw connections to rooms that are physically next to each other, and
+   mark any room that has a door or window leading outside (an access point) with its sensor(s).
+3. Optionally, use Configure → Options to bring in your phone's location and adjust the timing
+   settings to fit your household.
 
 ## Documentation
 

@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from custom_components.occupancy_tracker.occupancy_engine import (
     OUTSIDE,
     AreaActivitySignal,
+    AreaKind,
     ConnectorActivitySignal,
     EngineConfig,
     GraphConnector,
@@ -62,6 +63,16 @@ def real_house_graph() -> HouseGraph:
     (docs/STATUS.md's dev-instance section), including the two synthesized
     egress connectors `engine_adapter.build_house_graph()` would produce for
     `entrance_hallway`/`kitchen`'s real access-point entities.
+
+    `area_kinds` mirrors what `engine_adapter.py`'s topology-shape inference
+    (docs/DECISIONS.md's "area-kind classification" entry) would actually
+    compute for this fixture, not a hand-picked shortcut: `stairs` is the
+    only Area that's both a through-node (2 Connectors: entrance_hallway and
+    landing) *and* has no activity-evidence entity selected in the real
+    topology (see the "Unsensored rooms" section below) — `guest_bathroom`/
+    `bedroom_2` are also unsensored but are dead ends (1 Connector each), so
+    they read as ordinary (if unconfigured) ROOMs, not passages, under that
+    same shape-based rule.
     """
     connectors = (
         GraphConnector(CONN_LANDING_BATHROOM, LANDING, GUEST_BATHROOM),
@@ -90,7 +101,11 @@ def real_house_graph() -> HouseGraph:
         LANDING,
         GUEST_BATHROOM,
     )
-    return HouseGraph(area_ids=frozenset(area_ids), connectors=connectors)
+    return HouseGraph(
+        area_ids=frozenset(area_ids),
+        connectors=connectors,
+        area_kinds={STAIRS: AreaKind.TRANSIT},
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +392,61 @@ def test_unsensored_terminal_room_latches_belief_at_the_last_sensored_area() -> 
     end_result = counts(engine, end)
     assert end_result[LANDING] == 1  # still just the one person, not a second "arrival"
     assert sum(end_result.values()) == 1
+
+
+# -- Area-kind-scaled transit timing (docs/DECISIONS.md's "area-kind
+# classification" entry) -----------------------------------------------------
+
+
+def test_slow_walk_through_an_unsensored_stairwell_no_longer_creates_a_phantom_occupant() -> None:
+    """Reproduces the real walk-test failure pattern (docs/DECISIONS.md's
+    2026-08-15 "transit inference needs a rework" entry): a person walks
+    kitchen -> entrance_hallway -> stairs -> landing -> office, unhurried,
+    with none of the intermediate rooms' own sensors firing along the way
+    (a real, common outcome — a PIR miss, or simply not lingering long enough
+    to trigger one). The total gap (140s) exceeds the flat 90-second
+    `transit_confirmation_window` on its own — before the area-kind fix, this
+    is exactly the shape of walk that got misread as kitchen staying latched
+    at 1 *and* office becoming a second, phantom occupant. With `stairs`
+    correctly classified `AreaKind.TRANSIT` (a through-node with no evidence
+    entity of its own), the extra `transit_area_hop_extension` (60s default)
+    budget is enough to still resolve this as the same person continuing
+    their walk.
+    """
+    graph = real_house_graph()
+    engine = OccupancyEngine(graph)
+    apply_moves(engine, [Move(offset=0, area_id=KITCHEN)])
+
+    # 140s later, office's own sensor fires — nothing in between ever did.
+    apply_moves(engine, [Move(offset=140, area_id=OFFICE)])
+
+    end = T0 + timedelta(seconds=140)
+    result = counts(engine, end)
+    assert result[OFFICE] == 1
+    assert result[KITCHEN] == 0  # correctly drained, not left stranded
+    assert sum(result.values()) == 1  # ground truth: still just one person
+
+
+def test_an_implausibly_long_gap_still_falls_back_to_a_new_occupant() -> None:
+    """The area-kind extension is a bounded, real-walking-time budget, not an
+    unlimited one — a gap far beyond even the extended window (here: 20
+    minutes, well past `transit_confirmation_window` + `transit_area_hop_
+    extension`'s combined 150s) must still fall back to "no plausible source,
+    new occupant," the same conservative default as before this change. This
+    guards against the fix silently becoming "never disambiguate stairs
+    again" regardless of how stale the evidence actually is.
+    """
+    graph = real_house_graph()
+    engine = OccupancyEngine(graph)
+    apply_moves(engine, [Move(offset=0, area_id=KITCHEN)])
+
+    apply_moves(engine, [Move(offset=1200, area_id=OFFICE)])
+
+    end = T0 + timedelta(seconds=1200)
+    result = counts(engine, end)
+    assert result[KITCHEN] == 1  # stale, but still latched — not lost
+    assert result[OFFICE] == 1  # treated as a genuinely new/unrelated occupant
+    assert sum(result.values()) == 2  # the known, accepted overcounting limit
 
 
 # -- Overnight latching (SPEC.md §6.2: absence of signal never decays a

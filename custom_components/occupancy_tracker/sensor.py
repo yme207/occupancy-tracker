@@ -149,9 +149,12 @@ class AreaOccupantCountSensor(_EngineBoundSensor):
         return self._engine.area_state(self._area_id, dt_util.utcnow()).occupant_count
 
     @property
-    def extra_state_attributes(self) -> dict[str, str]:
+    def extra_state_attributes(self) -> dict[str, str | bool]:
         state = self._engine.area_state(self._area_id, dt_util.utcnow())
-        attributes = {"quality": state.quality.name.lower()}
+        attributes: dict[str, str | bool] = {
+            "quality": state.quality.name.lower(),
+            "needs_review": state.needs_review,
+        }
         if state.last_provenance is not None:
             attributes["provenance"] = state.last_provenance.name.lower()
         return attributes

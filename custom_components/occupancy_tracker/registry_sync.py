@@ -83,6 +83,18 @@ class EntitySnapshot:
     disabled: bool
     hidden: bool
     name: str
+    #: The entity's effective device class (e.g. "motion", "occupancy" for a
+    #: `binary_sensor`), or `None` if it doesn't have one. Resolved with the
+    #: same precedence Home Assistant's own state-attribute logic uses
+    #: (verified: `entity_registry.py`'s `RegistryEntry.write_unavailable_state`
+    #: — `self.device_class or self.original_device_class`, a user override
+    #: winning over the integration-provided default). Used to distinguish a
+    #: continuous-presence sensor (`occupancy` — "On means occupied, Off means
+    #: not occupied," per `binary_sensor`'s own `BinarySensorDeviceClass`
+    #: docstring) from an ordinary motion sensor, whose "off" only means no
+    #: recent *movement*, not "the room is empty" (docs/DECISIONS.md's decay
+    #: entry).
+    device_class: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +187,7 @@ class RegistrySync:
                 disabled=entry.disabled_by is not None,
                 hidden=entry.hidden_by is not None,
                 name=er.async_get_full_entity_name(self._hass, entry) or entry.entity_id,
+                device_class=entry.device_class or entry.original_device_class,
             )
             if resolved_area_id is not None:
                 entity_ids_by_area.setdefault(resolved_area_id, []).append(entry.entity_id)

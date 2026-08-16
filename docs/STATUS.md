@@ -990,17 +990,138 @@ real rework of the transit-timing model, not a quick tune — candidate directio
 `docs/DECISIONS.md` but nothing is implemented yet. **This is now the top-priority next-session item**,
 ahead of everything below.
 
-Also raised, not yet resolved: `Total Occupant Count` currently includes any Area the user tracks,
-with no distinction for an Area that's actually outdoors (e.g. `front_yard`/`back_yard`, real Areas
-kept in the graph on purpose to correctly handle "lingered outside before using the door") — so
-tracking yard motion as evidence inflates the whole-house total. No code change made; the
-project owner was given two options (don't select evidence entities for outdoor Areas at all, vs. a
-real "this Area is outside" flag excluded from the total) and hasn't yet said which they want.
+**Tenth** (2026-08-16): first half of the transit-timing rework landed — see `docs/DECISIONS.md`'s
+new "Area-kind classification (room vs. transit) added; transit timing now scales with it" entry for
+the full design and trade-offs (this was a deliberate design conversation with the project owner
+first, not a guessed implementation). `occupancy_engine.py` gained a topology-shape-inferred (with
+manual override) `AreaKind` (`ROOM`/`TRANSIT`) per Area, and the sensor-less-Connector transit search
+now gives a `TRANSIT`-classified pass-through (e.g. an unsensored stairwell) extra timing budget
+instead of checking every candidate against one flat window. A new scenario test reproduces the
+reported "kitchen→office, 4 hops, 140s, no intermediate signal" failure shape directly and confirms
+it now resolves correctly, with a guardrail test confirming an implausible gap still falls back to
+"new occupant" rather than an unbounded budget. 181 tests passing (was 166), `ruff`/`ruff format
+--check`/`mypy` all clean. **Not built this pass** (tracked follow-ups, see the DECISIONS.md entry):
+no topology-panel UI for `area_kind_overrides` yet (backend-only, same class of gap as Phase 8's
+"tunable with no UI path" lesson — don't let this go unnoticed); the decay half of the rework
+(auto-clear/flag a room whose evidence is restricted to continuous-presence-class sensors and has
+gone quiet) is still fully open, needs new `device_class` registry plumbing (verify against HA source
+first) and a real per-Area scheduled-deadline mechanism, and spans more than one architectural layer —
+scoped as its own follow-up slice rather than attempted alongside the timing fix. Also kicked off, in
+parallel: a project-wide pass simplifying all end-user-facing text (translations, panel copy, user-
+facing README sections) per direct project-owner feedback that it read as too jargon-heavy — a
+durable "plain language, no project jargon" standard was added to `docs/UX_GUIDELINES.md` §5.1 first,
+then a sub-agent applied it; see that sub-agent's own STATUS.md/DECISIONS.md additions for what it
+covered (code comments and `docs/*.md` were explicitly out of scope for that pass — different
+audience).
+
+**Eleventh** (2026-08-16, the plain-language sub-agent's own entry): applied `docs/UX_GUIDELINES.md`
+§5.1 to every end-user-facing string in scope. `translations/en.json` was already fully compliant
+from the 2026-08-09 rewrite (checked term-by-term against §5.1's banned-jargon list; no changes
+needed). `topology-panel.js`: 11 string literals rewritten, JS logic untouched — toolbar subtitle
+"House topology" → "Room layout"; card header "Areas & connections" → "Rooms & connections"; the
+"Draw connector"/"Drawing connector…" button and every piece of copy that referenced it by name
+(empty-topology notice, connect-mode captions, the connector's `aria-label`) → "Connect rooms"/
+"Connecting…"; the ring-color legend's raw "confirmed / latched / ambiguous" → "confirmed / probably
+occupied / checking" (this also fixes a real inconsistency — the legend wasn't reusing
+`QUALITY_LABELS`, the plain-language source of truth already used everywhere else); the live-stats
+badge and detail-panel "pending transit(s)"/"Unconfirmed transit" → "move(s) being confirmed"/"Still
+confirming a move"; the unsupported-entity notice's "entities" → "devices"; the raw `"unknown_error"`
+fallback string → "Something went wrong. Try refreshing the page." `node --check` confirms the file
+still parses (see `docs/DECISIONS.md`'s 2026-08-09 "backtick in a CSS comment" entry for why that
+check is mandatory, not optional, for this file). `README.md`'s "What it does"/"Installation"/
+"Getting started" sections reworded to match ("room layout editor" instead of "topology editor",
+"connections" instead of "connectors", "how sure it is"/"what it's currently checking" instead of
+"confidence tier"/"transit reasoning"); "Documentation"/"Contributing"/"License" sections left
+untouched (developer audience, out of scope). Full pytest suite re-run clean (181 passed, unchanged
+count — no Python touched by this pass). **Not done this pass**: browser verification of the panel
+copy — no browser tool available to this session, per `CLAUDE.md`'s standing "UI changes need live
+browser verification" rule; needed before this is considered fully closed out.
+
+Previously raised, now resolved (2026-08-16, "Twelfth" below): `Total Occupant Count` used to include
+any Area the user tracks with no distinction for genuinely-outdoor Areas — fixed with a real
+`outside_area_ids` flag, see below.
+
+**Twelfth** (2026-08-16): the decay half of the transit-timing rework, plus the outdoor-Area decision
+above, both landed — see `docs/DECISIONS.md`'s new "Decay for continuous-presence sensors, and
+outdoor Areas excluded from the total" entry for the full design (a deliberate design conversation
+with the project owner first, same as the "Tenth" area-kind slice). Summary: `registry_sync.py` now
+captures each entity's `device_class` (verified resolution precedence against HA source);
+`occupancy_engine.py` gained `expire_vacant_area()` (auto-clears a *verified* continuous-presence-only
+Area — `device_class: occupancy`, not `motion` or `presence`, checked against real HA semantics, not
+assumed) and a purely-informational `needs_review` flag for every other long-`LATCHED` Area;
+`signal_ingestion.py` gained a real, tested `async_call_later`-based grace-period timer, careful to
+never treat a sensor going `unavailable`/`unknown` as vacancy evidence. Separately,
+`TopologyData.outside_area_ids` now lets the user flag an Area (e.g. `front_yard`) as genuinely
+outdoors, excluded from `Total Occupant Count` while staying fully tracked otherwise. 30 new tests
+(216 total), `ruff`/`ruff format --check`/`mypy` all clean. **Not built this pass**: neither new field
+(`outside_area_ids`, nor the earlier `area_kind_overrides`) has any topology-panel UI yet — both are
+fully backend/storage/websocket-complete and tested, but unreachable from the panel itself. Delegated
+to a dedicated frontend sub-agent session (see "Thirteenth" below) rather than guessed at without
+browser verification.
+
+Also, at the project owner's request, a background research sub-agent surveyed how this class of
+problem (multi-room occupancy/counting from sparse binary sensors, given a known room-adjacency
+graph) has been solved elsewhere, and specifically whether a neural network (a GNN over the topology)
+could improve on the current deterministic engine. Bottom line, full report in the conversation
+transcript, not reproduced here since it's research output, not a project decision yet: the
+dominant prior art for this *exact* problem shape is **Bayesian/particle filtering over the room
+graph with explicit data-association** (Wilson &amp; Atkeson's 2005 STAR paper is the closest match to
+what this project does), not neural networks — the binding constraint on any ML approach here is the
+total absence of per-house labeled training data, not model capability. No GNN work exists for this
+specific task (per-room counting from binary sensors with a user-supplied topology). The
+recommendation was to stay deterministic in structure but replace the two places the current engine
+makes hard, irreversible commitments (the timing-window accept/reject, and the single-best-source
+BFS) with a small weighted-hypothesis filter, plus a hard whole-house count-conservation constraint
+anchored at egress points/`person` entities — a genuinely different, larger algorithm redesign than
+anything implemented this session. **Not acted on yet** — a real design decision for the project
+owner to weigh before any implementation, not something to start speculatively.
+
+**Thirteenth** (2026-08-16): the topology-panel UI for both fields the "Twelfth" entry left
+unreachable, built by the dedicated frontend sub-agent session flagged above. `www/topology-panel.js`'s
+detail panel gained two new controls, both following this file's existing optimistic-update-then-save
+patterns (`_setEgressEntities`/`_setAreaEntitySelections`):
+- **Area-kind override**: a 3-way Auto/Room/Passage segmented control (`_renderAreaKindControl`/
+  `_setAreaKindOverride`) — the project owner's explicit choice of a 3-way selector over a plain
+  toggle. "Auto" removes the key from `area_kind_overrides` entirely rather than writing a value, and
+  shows what "Auto" currently resolves to via a new "Currently treated as: Room/Passage" hint line.
+  That hint needed a small, deliberately narrow backend addition: `websocket_api.py`'s
+  `_engine_state_json` didn't expose the *effective* (override-or-inferred) `AreaKind` anywhere —
+  checked first, per this task's own instruction not to assume a backend change was needed — so a new
+  `"area_kind"` field was added per Area, sourced from `engine.graph.kind_of(area_id)` (already
+  computed by `engine_adapter.py` at graph-build time, so this is pure exposure, no new inference
+  logic). One assertion added to `test_websocket_api.py`'s existing
+  `test_get_engine_state_returns_area_states_and_total`; no other backend surface touched.
+- **Outdoor-area flag**: a plain-language checkbox ("This area is outside... — keep tracking it, but
+  don't count it in the house's total", `_renderOutsideToggle`/`_setAreaOutside`) toggling membership
+  in `outside_area_ids`. Given a visual cue: a second, larger dotted "halo" ring around the node
+  (`.outside-ring`, its own SVG circle rather than reusing `.node--egress`'s dashed main-stroke
+  treatment, since an outdoor Area can plausibly also be a real access point at the same time — e.g. a
+  porch with its own door sensor — and the two cues need to coexist without fighting over one stroke
+  property), documented in the graph legend alongside the existing dashed-ring egress entry.
+- **A real, previously-shippable bug found and fixed along the way**: `_saveTopology()`'s websocket
+  payload never included `area_kind_overrides`/`outside_area_ids` at all, even though
+  `websocket_save_topology`'s message schema has required both on every call since the "Twelfth"
+  backend session — meaning *every* topology save from the panel (a node drag, a checklist toggle, an
+  auto-arrange) would have failed schema validation the moment a real user hit it, not just "no UI for
+  the two new fields." Fixed as part of wiring the new controls' payload, not a separate change.
+
+`node --check custom_components/occupancy_tracker/www/topology-panel.js` passes (checked after every
+meaningful edit, per this file's documented backtick-in-a-template-literal history). Full `pytest`
+suite: 216 passed (was 216 — one assertion added to an existing test, no new test). `ruff`/
+`ruff format --check`/`mypy` all clean. **No browser available this session either** — per
+`CLAUDE.md`'s standing rule, this is inspected-and-parses-correctly, not visually confirmed; needs the
+project owner's live-browser verification before considering either control done, same as the
+"Eleventh" plain-language pass above.
 
 Remaining, not blocking either half of this session's work:
 
-1. **Transit-timing rework (see "Ninth" above)** — the real next priority; needs a design
-   conversation before implementation, not a quick patch.
+1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth" above)** — the timing/area-kind-
+   scaling half, the decay half, and the topology-panel UI for both `area_kind_overrides` and
+   `outside_area_ids` are all now built and tested; only live-browser verification remains (see
+   "Thirteenth"). Still open, a genuinely separate/larger question raised by this session's research
+   pass (see "Twelfth" above): whether to eventually move the core transit-inference algorithm from
+   single-hypothesis/hard-threshold to a small weighted-hypothesis Bayesian filter — a real design
+   decision for the project owner, not started.
 2. **Outdoor-Area-vs-total-occupancy decision** (see "Ninth" above) — needs the project owner's choice
    between the two options presented.
 3. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
@@ -1019,6 +1140,10 @@ Remaining, not blocking either half of this session's work:
    repeatable algorithm testing) anyway — but if a future session specifically needs live HA
    entity-triggering (e.g. to test `signal_ingestion.py`'s own wiring, not just the engine), this would
    need a fresh diagnosis attempt.
+7. **Plain-language pass needs browser verification** (see "Eleventh" above) — `topology-panel.js`'s
+   rewritten copy was checked with `node --check` and by re-reading the diff, but never seen rendered;
+   confirm it reads well and nothing looks cut off/misaligned in an actual browser before considering
+   this pass fully done.
 
 The browser-verification loop this session (project owner testing → real bug found → fix → retest)
 worked well through six slices in a row now and is worth continuing — see "Local dev Home Assistant

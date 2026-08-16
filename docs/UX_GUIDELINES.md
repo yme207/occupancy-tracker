@@ -71,8 +71,32 @@ size hint, near-house zones — see `SPEC.md` §7.2/§7.3) must be presented as:
 - No placeholder/lorem-ipsum copy, no generic icon substitutes, no "TODO" text shipped to users.
 - Error and empty states are written deliberately (what happened, what to do next) — not raw
   exception text or a blank panel.
-- Copy is concise and matches Home Assistant's own tone (direct, technical-but-approachable) —
-  see HA's own settings pages for the reference tone if in doubt.
+- Copy is concise and matches Home Assistant's own tone (direct, plain, approachable).
+
+### 5.1 Plain language, always (durable standard, not a one-off)
+
+**Every piece of text an end user actually reads — not code comments, not `docs/*.md` — must
+assume no technical or algorithmic background.** This applies everywhere a person using Home
+Assistant (not a developer reading this repo) encounters text from this integration:
+`translations/en.json` (config flow, options flow, service names/descriptions), the topology
+panel's copy (`custom_components/occupancy_tracker/www/`), and user-facing prose in `README.md`
+(installation/usage sections a HACS user reads, as opposed to developer-oriented sections).
+
+Concretely:
+
+- Describe cause and effect ("turn this up if people in your home often take a while getting
+  between rooms"), not internal mechanics ("increases the transit-confirmation window").
+- No jargon from this project's own internals — "transit," "provenance," "quality tier,"
+  "connector," "topology graph," "occupant token," etc. are working vocabulary for developers
+  reading `docs/SPEC.md`/`docs/ARCHITECTURE.md`, never words to show a user directly. Prefer
+  "room," "sensor," "how sure it is," "the layout you've drawn."
+- Prefer a short, concrete example over an abstract description when one clarifies faster.
+- This standard originated from direct project-owner feedback (`docs/DECISIONS.md`'s 2026-08-09
+  "Options-flow/service translations rewritten for non-technical users" entry: "the language needs
+  to assume the user doesn't have an understanding of the code or technical methods... dumb it
+  down to simple concepts they can understand") — treat it as durable, not specific to that one
+  rewrite. Apply it to *every* new or edited piece of user-facing text going forward, not just the
+  surfaces it was first applied to.
 
 ## 6. Accessibility baseline
 
@@ -88,5 +112,7 @@ size hint, near-house zones — see `SPEC.md` §7.2/§7.3) must be presented as:
 - [ ] Works in both light and dark theme.
 - [ ] No hardcoded colors/spacing outside HA's design tokens.
 - [ ] Every tunable has a label, sensible range, and a plain-language description.
+- [ ] All new/edited user-facing text meets §5.1's plain-language standard (no project jargon,
+      cause-and-effect phrasing, no assumed technical background).
 - [ ] No placeholder content remains.
 - [ ] Interaction feels immediate (optimistic updates where appropriate).

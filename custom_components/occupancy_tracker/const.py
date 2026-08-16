@@ -23,3 +23,12 @@ CONF_CONFIRMED_FRESHNESS_WINDOW = "confirmed_freshness_window"
 #: Options-flow key: `ZoneFusionConfig.pre_arm_window` (SPEC.md §6.7/§7.2),
 #: same duration-dict storage as above.
 CONF_PRE_ARM_WINDOW = "pre_arm_window"
+#: Options-flow key: `EngineConfig.transit_area_hop_extension` (docs/DECISIONS.md's
+#: "area-kind classification" entry), same duration-dict storage as above.
+CONF_TRANSIT_AREA_HOP_EXTENSION = "transit_area_hop_extension"
+#: Options-flow key: `EngineConfig.decay_grace_period` (docs/DECISIONS.md's
+#: decay entry), same duration-dict storage as above.
+CONF_DECAY_GRACE_PERIOD = "decay_grace_period"
+#: Options-flow key: `EngineConfig.long_latched_review_threshold` (docs/DECISIONS.md's
+#: decay entry), same duration-dict storage as above.
+CONF_LONG_LATCHED_REVIEW_THRESHOLD = "long_latched_review_threshold"

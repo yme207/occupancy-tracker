@@ -14,6 +14,239 @@ Format:
 
 ---
 
+## 2026-08-16 — Topology-panel UI for area-kind override and outdoor-area flag; outdoor Areas get a dotted halo ring, not a stroke reuse
+**Decision:** Built the topology-panel UI for the two backend-only fields the same day's earlier
+"Decay for continuous-presence sensors..." and "Area-kind classification..." entries below left
+unreachable (`area_kind_overrides`, `outside_area_ids`). Two decisions worth recording beyond just
+following the plan already agreed with the project owner:
+1. **Outdoor-area visual cue is a second, larger dotted ring drawn as its own SVG circle
+   (`.outside-ring`), not a reuse of `.node--egress`'s dashed main-stroke treatment.** An Area can
+   plausibly be both outdoors *and* a real access point at once (e.g. a front porch with its own door
+   sensor) — SPEC.md §5.1's "lingered outside before using the door" scenario is exactly this shape —
+   so the two cues need to be visually simultaneous without fighting over one stroke property. A halo
+   ring at `NODE_RADIUS + 5` with a distinct dot pattern (`1 4` vs. egress's `3 2`) keeps both legible
+   at once and needed no new HA CSS token — reuses `--secondary-text-color`, already verified/used
+   elsewhere in this file. Documented in the graph legend alongside the existing egress entry, per this
+   session's brief.
+2. **`websocket_api.py`'s `_engine_state_json` gained a new `"area_kind"` field per Area** — the
+   *effective* (override-or-inferred) `AreaKind`, needed so the panel's "Auto" selector state can show
+   what "Auto" currently resolves to. Checked first whether this already existed anywhere in the
+   websocket API (it didn't) before adding it, per this task's explicit instruction not to assume a
+   backend change was needed. Deliberately minimal: `engine_adapter.py` already computes this at
+   graph-build time (`HouseGraph.kind_of`), so this is pure exposure of an existing value, not new
+   inference logic — one line, one new test assertion on the existing
+   `test_get_engine_state_returns_area_states_and_total`, `ruff`/`mypy`/full `pytest` (216 passed) all
+   re-verified clean.
+3. **A real, independently-shippable bug found while wiring the new controls' save payload**:
+   `topology-panel.js`'s `_saveTopology()` never included `area_kind_overrides`/`outside_area_ids` in
+   its websocket call at all, even though `websocket_save_topology`'s message schema has required both
+   on every save since the same day's earlier backend session — meaning every topology save from the
+   panel (a node drag, any checklist toggle, auto-arrange) would have failed schema validation for any
+   user who happened to load the panel after that backend change landed, regardless of whether they
+   ever touched the two new fields. Fixed as part of extending the same save-payload object the task
+   instructions pointed at, not as a separate change.
+
+The 3-way Auto/Room/Passage selector (project owner's explicit prior choice, not decided this session)
+and the outside checkbox both reuse plain, native, already-keyboard-accessible controls (`<button>`,
+`<input type="checkbox">`) styled with this file's existing `.tool-btn`/`.checklist-item` classes,
+rather than introducing a new HA custom element — consistent with the already-logged 2026-08-09
+"`ha-checkbox` swap investigated, deliberately not made" decision (below), and for the same underlying
+reason: no browser available to verify an unfamiliar component's event/property contract against the
+installed frontend bundle.
+**Why:** Direct task brief from the project owner (relayed via a dedicated frontend sub-agent session):
+both fields were fully backend-complete and tested but had no UI path at all — the same "tunable with
+no UI" gap class Phase 8 was burned by once already (see `docs/STATUS.md`'s Phase 8 entry).
+**Alternatives considered:** Reusing `.node--egress`'s dashed main-stroke for the outdoor cue too
+(distinguished only by dash spacing) — rejected once the porch/access-point-outdoors overlap case was
+considered, since both cues would then compete for the same `stroke`/`stroke-dasharray` CSS property on
+the same element. Coloring the outdoor node's fill instead of adding a ring — rejected as harder to
+keep legible across both light/dark themes without a dedicated, unverified new color token, whereas a
+neutral-toned dotted ring using an already-proven token sidesteps that entirely.
+**Not verified in-browser this session** — no browser tool available; `node --check` passes and the
+code was re-read for correctness, but per `CLAUDE.md`'s standing UI rule this needs the project owner's
+live confirmation before being considered fully done (see `docs/STATUS.md`'s "Thirteenth" entry).
+
+## 2026-08-16 — Decay for continuous-presence sensors, and outdoor Areas excluded from the total
+**Decision:** Resolves the remaining half of the 2026-08-15 "transit inference needs a rework" entry
+below, plus a separately-raised open item, both per the project owner's explicit direction on the
+trade-offs (a design conversation held before implementation, not guessed):
+
+1. **Decay, gated strictly on verified continuous-presence sensors.** `registry_sync.py`'s
+   `EntitySnapshot` now carries `device_class` (`entry.device_class or entry.original_device_class`
+   — the same precedence Home Assistant's own state-attribute logic uses, verified from
+   `entity_registry.py` source, not guessed). `engine_adapter.py` computes `decay_eligible_area_ids`:
+   an Area whose *entire* selected evidence list is `binary_sensor` entities with
+   `device_class: occupancy` — verified from the installed `BinarySensorDeviceClass` source to
+   specifically mean "On means occupied, Off means not occupied," unlike `motion` ("no motion,"
+   which says nothing about a still-but-present person) or `presence` (a *person's* home/away state,
+   the same concept `zone_fusion.py` already covers — not room-level occupancy; this distinction
+   matters and was checked, not assumed). `occupancy_engine.py` gained `expire_vacant_area(area_id,
+   now)` (a no-op unless `area_id` is decay-eligible and nonzero) and a `needs_review` flag on
+   `AreaState` — purely informational, `True` once a *non*-decay-eligible Area has been `LATCHED`
+   and nonzero for longer than `EngineConfig.long_latched_review_threshold` (default 12h). Timing
+   itself lives in `signal_ingestion.py`, not the engine (`decay_grace_period`, default 5 minutes,
+   exposed via `OccupancyEngine.decay_grace_period`): a new, independent listener per decay-eligible
+   Area schedules `homeassistant.helpers.event.async_call_later` once *every* selected entity is
+   confirmed `"off"` (verified `async_call_later` signature/return from `helpers/event.py` source —
+   its return value is the cancel callable), cancels it on any return to `"on"`, and re-checks live
+   state both when scheduling and when the callback actually fires before calling
+   `expire_vacant_area` — deliberately *not* "anything that isn't on": an entity going
+   `"unavailable"`/`"unknown"` is absence of *data*, not positive vacancy evidence, and treating it
+   as such would silently reintroduce the exact failure mode `SPEC.md` §6.2's "never decay on
+   absence of signal" rule exists to prevent. `needs_review` is surfaced via the websocket
+   explainability API and as a new `sensor.py` per-Area attribute; no automatic count change happens
+   for it, `SPEC.md` §6.2's "never silently changes the count" guarantee holds unchanged for every
+   Area except a verified decay-eligible one.
+2. **Outdoor Areas excluded from `Total Occupant Count`.** `TopologyData.outside_area_ids` (storage
+   schema 1.4 → 1.5, validated/reconciled/websocket-exposed the same way as `area_kind_overrides`)
+   flags an Area (e.g. `front_yard`/`back_yard`) as genuinely outdoors. `HouseGraph.outside_area_ids`
+   excludes it from `OccupancyEngine.total_occupant_count()`'s sum only — the Area's own count,
+   quality, and role in transit inference (SPEC.md §5.1's "lingered outside before using the door"
+   case) are completely untouched; this is purely a house-level reporting concern.
+
+Both are backend-complete and tested (30 new tests, 216 total — engine unit tests for
+`expire_vacant_area`/`needs_review`/`total_occupant_count` exclusion, `engine_adapter` tests for
+`device_class`-based eligibility inference, `registry_sync` tests for the device-class resolution
+precedence, `topology_store` round-trip/reconcile/validate/migration tests for both new fields,
+`websocket_api` save/reject tests, and `signal_ingestion` tests for the timer scheduling/
+cancellation/firing/stale-callback/unavailable-handling logic — the last of these using
+`unittest.mock.patch` on `async_call_later` specifically, the first mock in this project's test
+suite; deliberately scoped to controlling a genuinely real-time async primitive deterministically,
+not to faking any HA registry/State/Context object, which `docs/TESTING.md`'s "not a hand-rolled
+mock with a different shape than production" rule is actually about). `ruff`/`ruff format --check`/
+`mypy`/full `pytest` all clean.
+
+**Explicitly not built this pass:** the topology panel has no UI for either `outside_area_ids` or
+`area_kind_overrides` yet — both are backend/storage/websocket-complete but unreachable from the
+panel itself, the same class of gap Phase 8 was burned by once already (`docs/STATUS.md`). Delegated
+to a dedicated frontend sub-agent session immediately following this entry, since neither this
+session nor that one has a browser to verify a Home Assistant panel change against — real
+verification still needs the project owner.
+**Why:** Direct project-owner decisions, made explicitly before implementation began (not guessed):
+decay should auto-clear *and* flag, but only for sensors verified to mean "not occupied" when off;
+grace period defaults to 5 minutes precisely because a continuous-presence sensor's "off" is
+comparatively trustworthy almost immediately, unlike a PIR's; outdoor Areas should get a real
+first-class flag (not a "just don't select evidence for them" convention) since it's the more
+correct, durable fix and this project already has the exact same shape of mechanism
+(`area_kind_overrides`) to mirror.
+**Alternatives considered:** Decaying any Area once all its evidence entities go "off," regardless
+of sensor type — rejected, this is precisely the failure mode `SPEC.md` §6.2's original "latch, not
+decay" decision (2026-08-08) was designed to prevent, since an ordinary motion sensor's "off" doesn't
+mean a still, silent occupant left. Treating `presence`-class entities the same as `occupancy` for
+decay eligibility — rejected once the actual HA source was checked: `presence` means a *person's*
+home/away state (the same concept zone fusion already covers), not "someone is physically in this
+room," so including it would have been a real correctness bug caught only by verifying instead of
+assuming both classes meant the same thing.
+
+## 2026-08-16 — Area-kind classification (room vs. transit) added; transit timing now scales with it
+**Decision:** Partially resolves the 2026-08-15 "transit inference needs a rework" entry below (the
+timing-scaling half; the "nothing ever self-corrects" half is still open, see that entry). A new
+`occupancy_engine.AreaKind` enum (`ROOM` / `TRANSIT`) is attached per-Area to `HouseGraph`
+(`area_kinds`, default `ROOM` if absent — a `HouseGraph` built before this existed still behaves
+identically). `engine_adapter.py` infers it from topology shape alone: an Area is `TRANSIT` only if
+it's a through-node (2+ Connectors, including a synthesized egress crossing) **and** has no
+activity-evidence entity selected of its own — exactly `SPEC.md` §5.1's own example ("a hallway with
+no sensors at all, connecting two sensored rooms"). A dead-end Area never qualifies regardless of
+evidence, so an unconfigured-but-genuinely-a-room Area isn't misclassified as a passage just because
+nothing's selected yet. `TopologyData.area_kind_overrides` (storage schema 1.3 → 1.4, with a
+migration) lets the user manually override the inference per Area — validated (known area, value in
+`{"room", "transit"}`) the same way every other topology field is, and treated as engine-relevant
+(triggers a reload) since — unlike `area_positions`/`outside_position` — it changes real transit-
+timing behavior, not just display.
+
+The engine's own `_plausible_transit_source` (the breadth-first, nearest-candidate-first search from
+the 2026-08-15 "multi-hop, nearest-candidate-first" entry) now accumulates a new
+`EngineConfig.transit_area_hop_extension` (default 60s) budget once per `TRANSIT`-classified empty
+Area it walks through en route to a candidate, instead of checking every candidate against one flat
+`transit_confirmation_window` regardless of what's actually being walked through. A same-room or
+short adjacent-room gap is unaffected (extension only ever adds to the budget, never subtracts);
+a walk through a real hallway/stairwell gets a proportionally larger, still-bounded budget. Exposed
+as a new options-flow `DurationSelector` tunable (`transit_area_hop_extension`), same pattern as the
+other timing windows.
+
+**Why:** Direct project-owner report: overnight, with one real person in the house the entire time,
+`Total Occupant Count` latched at 4 — the same root cause the 2026-08-15 entry already diagnosed
+(a flat 90s window doesn't scale with a real, multi-hop, unhurried walk; a missed window strands a
+phantom occupant that then never self-corrects, since `SPEC.md` §6.2's latch-not-decay rule is
+deliberate and not being reversed). The project owner separately proposed classifying Areas by
+topology shape (connectivity/edge-vs-intermediate) specifically so a stairwell/hallway could be
+treated differently from a room people actually linger in — this is that classification, scoped
+first to the lower-risk, purely-timing-affecting half of the fix (the pure-Python engine layer,
+testable against the existing real-house scenario harness) rather than attempting the full rework
+(which also touches decay semantics, see below) in one pass, per `docs/AGENT_WORKFLOW.md`'s slice-
+sizing guidance.
+
+A new scenario test
+(`tests/test_engine_scenarios_realhouse.py::test_slow_walk_through_an_unsensored_stairwell_no_longer_creates_a_phantom_occupant`)
+reproduces the reported failure shape directly: kitchen → (unhurried, 140s, no intermediate sensor
+firing) → office, a 4-hop walk through `landing`/`stairs`/`entrance_hallway`, of which only `stairs`
+classifies as `TRANSIT` in the real topology (the other two have their own selected evidence).
+Before this change this exceeded the flat 90s window and produced the reported phantom-occupant
+shape; after, the extra 60s budget (150s effective) resolves it correctly as one continuous transit.
+A paired guardrail test confirms an implausibly long gap (20 minutes) still correctly falls back to
+"new occupant," not an unbounded budget.
+
+**Explicitly not built this pass, tracked for a follow-up session:**
+- **The topology panel has no UI to set `area_kind_overrides` yet** — the backend/storage/websocket
+  plumbing is complete and tested, but there's no way to invoke it from the panel itself. This
+  project has been burned before by a tunable existing in code with no UI path to it (`docs/STATUS.md`'s
+  Phase 8 entry) — recording this explicitly rather than letting it go unnoticed is the whole point
+  of that lesson. Needs a browser-testable frontend slice, not attempted here (no browser available
+  this session either).
+- **The decay half of the 2026-08-15 rework is still open.** Project-owner direction (this session):
+  when an Area's presence evidence goes quiet, do both — flag a long-`LATCHED` Area for review by
+  default, and additionally auto-clear to 0 after a grace period, but *only* for Areas whose selected
+  evidence is restricted entirely to continuous-presence-class sensors (e.g. mmWave/radar
+  `device_class: occupancy`) — never for ordinary motion sensors, whose "off" doesn't mean "empty"
+  (that distinction is exactly why `SPEC.md` §6.2 rejected time-based decay in the first place; see
+  the 2026-08-08 "latch, not decay" decision). This needs new plumbing this session didn't build:
+  `registry_sync.py` doesn't capture `device_class` at all today (verify against installed HA source
+  before use, per `CLAUDE.md`'s hard rule 1 — not yet done), and turning "all qualifying evidence has
+  been off long enough" into an actual count change needs a real scheduled deadline per Area (a
+  legitimate `async_call_later`-style timer, not a polling loop) plus wiring through
+  `signal_ingestion.py` to notice "off" transitions at all (today it only ever reacts to a transition
+  *to* "on"). Scoped as its own follow-up slice, not attempted here — it spans registry sync,
+  topology store, signal ingestion, and the engine, more than one architectural layer at once per
+  `docs/AGENT_WORKFLOW.md`'s slice-sizing guidance.
+**Alternatives considered:** Scaling the window by raw hop count regardless of what's being crossed
+(the simpler alternative the 2026-08-15 BFS entry already flagged) — rejected in favor of the
+area-kind-aware version, since the project owner specifically wants a real room (however many
+Connectors it happens to have) to *not* get extra budget just for being well-connected, only a
+genuine passage should. Making `AreaKind` a third, engine-owned concept requiring its own explicit
+user declaration (like egress points) — rejected as unnecessary manual burden for the common case;
+inference-with-override (matching this project's existing "derive, don't hand-declare" pattern
+everywhere else) covers it with an escape hatch for the cases shape alone gets wrong.
+
+## 2026-08-16 — Plain-language pass over all end-user-facing text (translations, panel copy, README)
+**Decision:** Applied the newly-added `docs/UX_GUIDELINES.md` §5.1 standard across every string an
+actual Home Assistant user reads: `translations/en.json`, `www/topology-panel.js`'s string literals
+(headings, button/notice/legend/tooltip text — JS logic untouched), and `README.md`'s "What it does"/
+"Installation"/"Getting started" sections. `en.json` was already fully compliant from the 2026-08-09
+rewrite — verified term-by-term against §5.1's banned-jargon list, no changes made. In
+`topology-panel.js`, the two jargon terms with no obvious one-word plain equivalent: "connector" →
+"connection" everywhere it was shown as prose or an `aria-label` (the button itself, "Draw
+connector"/"Drawing connector…", became the verb phrase "Connect rooms"/"Connecting…" instead of a
+direct noun swap, since "Draw connection" read awkwardly as a button label); "transit" (as in "pending
+transit") → "move" ("2 moves being confirmed" / "Still confirming a move with Kitchen") since
+"transit" has no single plain-English synonym that keeps the "walking between rooms" meaning without
+sounding like public transportation. Also fixed a real inconsistency found while auditing: the ring-
+color legend hardcoded raw enum-ish words ("confirmed / latched / ambiguous") instead of reusing the
+already-correct `QUALITY_LABELS` plain-language map used everywhere else in the same file — changed to
+"confirmed / probably occupied / checking" to match.
+**Why:** Direct project-owner feedback that the product's language was "very obtuse and complex" with
+too much jargon — the same category of feedback that produced the 2026-08-09 options-flow rewrite and
+this session's new §5.1 standard, now applied as a full pass rather than left to accumulate
+piecemeal. `node --check` confirms `topology-panel.js` still parses (mandatory for this file per the
+2026-08-09 "backtick in a CSS comment" entry above); the full pytest suite (181 tests) stayed green,
+unaffected since no Python was touched. Not yet browser-verified — no browser tool available to this
+pass; see `docs/STATUS.md`'s "Eleventh" Next-action entry.
+**Alternatives considered:** For "connector," keeping the noun ("connection") in the button label too
+("Draw connection") — rejected as reading like a typo/awkward translation next to "Draw"; the verb-
+phrase button label ("Connect rooms") reads more naturally and matches the toolbar's other short
+action-verb buttons ("Auto-arrange," "Fit view"). Leaving `docs/*.md` and Python comments/docstrings
+untouched — not an alternative actually considered, it's explicitly out of scope per §5.1 itself
+(different audience: developers/future coding sessions, not end users).
+
 ## 2026-08-15 — [OPEN, needs design work] Real-house walk-test: transit inference needs a rework,
 ## not a tuning tweak
 **Status:** Not fixed. Findings and candidate directions recorded here for a deliberate design

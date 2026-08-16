@@ -14,9 +14,10 @@ classification is future work.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from .engine_adapter import egress_connector_id
 from .occupancy_engine import (
@@ -32,6 +33,13 @@ from .topology_store import TopologyData
 #: module docstring — richer, device-class-aware classification is future
 #: work, not this first pass).
 _ACTIVE_STATE = "on"
+#: The only state value treated as positive vacancy evidence for the decay
+#: mechanism below (docs/DECISIONS.md) — deliberately *not* "anything that
+#: isn't on" (e.g. "unavailable"/"unknown"): a sensor going offline is an
+#: absence of *data*, not positive evidence of an empty room, and treating it
+#: as such would silently reintroduce exactly the failure mode SPEC.md §6.2's
+#: "never decay on absence of signal" rule exists to prevent.
+_INACTIVE_STATE = "off"
 
 
 class SignalIngestion:
@@ -42,12 +50,22 @@ class SignalIngestion:
         self._engine = engine
         self._context_tracker = AutomationContextTracker(hass)
         self._unsub: list[CALLBACK_TYPE] = []
+        #: Per-Area pending decay timers (docs/DECISIONS.md) — a cancel
+        #: callable, present only while that Area's decay-eligible evidence
+        #: is currently believed fully off and its grace period hasn't
+        #: elapsed yet.
+        self._decay_timer_cancel: dict[str, CALLBACK_TYPE] = {}
+        #: Snapshot of each decay-eligible Area's own evidence entity ids, so
+        #: the timer callback (which fires with no other context) knows which
+        #: entities to re-check before actually clearing.
+        self._decay_entity_ids: dict[str, tuple[str, ...]] = {}
 
     @callback
     def async_start(self, topology: TopologyData) -> None:
         """Subscribe to every entity the given topology selects as evidence."""
         self._context_tracker.async_start()
 
+        decay_eligible = self._engine.graph.decay_eligible_area_ids
         for area_id, entity_ids in topology.area_entity_selections.items():
             if not entity_ids:
                 continue
@@ -56,6 +74,13 @@ class SignalIngestion:
                     self._hass, list(entity_ids), self._area_listener(area_id)
                 )
             )
+            if area_id in decay_eligible:
+                self._decay_entity_ids[area_id] = entity_ids
+                self._unsub.append(
+                    async_track_state_change_event(
+                        self._hass, list(entity_ids), self._decay_listener(area_id, entity_ids)
+                    )
+                )
 
         for egress in topology.egress_points:
             if not egress.entity_ids:
@@ -74,6 +99,9 @@ class SignalIngestion:
         for unsub in self._unsub:
             unsub()
         self._unsub.clear()
+        for cancel in list(self._decay_timer_cancel.values()):
+            cancel()
+        self._decay_timer_cancel.clear()
 
     def _area_listener(self, area_id: str) -> Callable[[Event[EventStateChangedData]], None]:
         @callback
@@ -116,3 +144,61 @@ class SignalIngestion:
             )
 
         return listener
+
+    def _all_confirmed_off(self, entity_ids: tuple[str, ...]) -> bool:
+        """True only if *every* entity is currently, positively `off` — a
+        missing/`unavailable`/`unknown` entity is absence of data, not
+        evidence of vacancy, so it counts as "not confirmed off" (see the
+        module-level `_INACTIVE_STATE` docstring).
+        """
+        return all(
+            (state := self._hass.states.get(entity_id)) is not None
+            and state.state == _INACTIVE_STATE
+            for entity_id in entity_ids
+        )
+
+    def _decay_listener(
+        self, area_id: str, entity_ids: tuple[str, ...]
+    ) -> Callable[[Event[EventStateChangedData]], None]:
+        """Schedules/cancels `area_id`'s decay timer (docs/DECISIONS.md) as
+        its own decay-eligible evidence entities turn on/off. Independent of
+        `_area_listener` above (which still separately produces the ordinary
+        `AreaActivitySignal` on an "on" transition) — this one only ever
+        drives the auto-clear-after-quiet mechanism, never the count going up.
+        """
+
+        @callback
+        def listener(event: Event[EventStateChangedData]) -> None:
+            new_state = event.data["new_state"]
+            if new_state is None or new_state.state != _INACTIVE_STATE:
+                # A real "on", or the entity going unavailable/unknown/gone —
+                # none of these are positive vacancy evidence; cancel any
+                # in-progress countdown rather than let it complete on stale
+                # grounds.
+                self._cancel_decay_timer(area_id)
+                return
+            if not self._all_confirmed_off(entity_ids):
+                return  # at least one is still on (or has no data) — not vacant yet
+            self._schedule_decay_timer(area_id, entity_ids)
+
+        return listener
+
+    def _cancel_decay_timer(self, area_id: str) -> None:
+        cancel = self._decay_timer_cancel.pop(area_id, None)
+        if cancel is not None:
+            cancel()
+
+    def _schedule_decay_timer(self, area_id: str, entity_ids: tuple[str, ...]) -> None:
+        if area_id in self._decay_timer_cancel:
+            return  # already counting down
+
+        @callback
+        def _fire(now: datetime) -> None:
+            self._decay_timer_cancel.pop(area_id, None)
+            if not self._all_confirmed_off(entity_ids):
+                return  # re-occupied (or lost data) since scheduling — do nothing
+            self._engine.expire_vacant_area(area_id, now)
+
+        self._decay_timer_cancel[area_id] = async_call_later(
+            self._hass, self._engine.decay_grace_period, _fire
+        )
