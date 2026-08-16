@@ -296,6 +296,23 @@ class EngineConfig:
     #: purely informational, never an automatic count change (see
     #: `AreaState.needs_review`'s own docstring for why).
     long_latched_review_threshold: timedelta = timedelta(hours=12)
+    #: Minimum number of times a decay-eligible Area must have been walked
+    #: through — found *empty* along a transit search that went on to
+    #: actually resolve (docs/DECISIONS.md's "per-Area sensor reliability"
+    #: entry) — before that Area's own continuous-presence sensor(s) are
+    #: treated as sometimes missing people, and its `decay_grace_period`
+    #: widens accordingly (`effective_decay_grace_period`). Below this, one
+    #: or two misses could just as easily be a genuine empty pass-through;
+    #: only a repeated pattern is trusted. Internal tuning knob, not exposed
+    #: to users, same reasoning as `transit_learning_min_samples`.
+    sensor_reliability_min_misses: int = 3
+    #: Factor `decay_grace_period` is multiplied by for a decay-eligible Area
+    #: once it's crossed `sensor_reliability_min_misses` (docs/DECISIONS.md's
+    #: "per-Area sensor reliability" entry) — a proven-spotty sensor gets
+    #: more benefit-of-the-doubt before its "off" reading is trusted as
+    #: genuine vacancy, rather than being treated identically to a
+    #: consistently-reliable one. Internal tuning knob, not exposed to users.
+    unreliable_sensor_grace_multiplier: float = 3.0
     #: Optional whole-house "typical household size" confidence hint (SPEC.md
     #: §6.4) — deliberately *not* consulted anywhere in the count-inference
     #: logic above (`_handle_area_activity` et al.): SPEC.md is explicit this
@@ -382,6 +399,7 @@ class OccupancyEngine:
         graph: HouseGraph,
         config: EngineConfig | None = None,
         learned_transit_times: Mapping[frozenset[str], tuple[int, float, float]] | None = None,
+        learned_sensor_reliability: Mapping[str, int] | None = None,
     ) -> None:
         self._graph = graph
         self._config = config or EngineConfig()
@@ -411,6 +429,15 @@ class OccupancyEngine:
         #: "uncertain births" entry) — bounded by
         #: `EngineConfig.max_uncertain_births`.
         self._uncertain_births: list[_UncertainBirthRecord] = []
+        #: How many times each Area has been found empty along a transit
+        #: search that went on to resolve (docs/DECISIONS.md's "per-Area
+        #: sensor reliability" entry) — only ever incremented for a Area in
+        #: `graph.decay_eligible_area_ids`, since only continuous-presence-
+        #: class evidence is trustworthy enough to call a silent "off"
+        #: reading during a confirmed walk-through a real miss. Seeded from
+        #: `learned_sensor_reliability` (persisted by the HA-dependent layer,
+        #: same pattern as `learned_transit_times`).
+        self._area_miss_counts: dict[str, int] = dict(learned_sensor_reliability or {})
 
     @property
     def graph(self) -> HouseGraph:
@@ -460,8 +487,40 @@ class OccupancyEngine:
     def decay_grace_period(self) -> timedelta:
         """How long `signal_ingestion.py` should wait, once a decay-eligible
         Area's evidence goes fully quiet, before calling `expire_vacant_area`.
+
+        The flat, config-driven default — `effective_decay_grace_period` is
+        what callers should actually schedule against, since it accounts for
+        a specific Area's own learned reliability.
         """
         return self._config.decay_grace_period
+
+    def effective_decay_grace_period(self, area_id: str) -> timedelta:
+        """The grace period `signal_ingestion.py` should actually schedule
+        `area_id`'s decay timer against (docs/DECISIONS.md's "per-Area sensor
+        reliability" entry): the flat `decay_grace_period`, widened by
+        `EngineConfig.unreliable_sensor_grace_multiplier` once this specific
+        Area has been caught, `sensor_reliability_min_misses` times or more,
+        sitting silent while a transit search resolved *through* it as an
+        empty pass-through — real evidence someone was physically there and
+        this Area's own continuous-presence sensor(s) didn't catch it. Areas
+        outside `graph.decay_eligible_area_ids`, or without enough of a track
+        record yet, get the flat default unchanged.
+        """
+        if area_id not in self._graph.decay_eligible_area_ids:
+            return self._config.decay_grace_period
+        if self._area_miss_counts.get(area_id, 0) < self._config.sensor_reliability_min_misses:
+            return self._config.decay_grace_period
+        return self._config.decay_grace_period * self._config.unreliable_sensor_grace_multiplier
+
+    def learned_sensor_reliability(self) -> dict[str, int]:
+        """Snapshot of each Area's accumulated "found empty during a resolved
+        transit search" count (docs/DECISIONS.md's "per-Area sensor
+        reliability" entry) — for the HA-dependent layer to persist and for
+        diagnostics. Feed straight back into a new `OccupancyEngine`'s
+        `learned_sensor_reliability` constructor argument to resume tracking
+        from where it left off.
+        """
+        return dict(self._area_miss_counts)
 
     def learned_transit_times(self) -> dict[frozenset[str], tuple[int, float, float]]:
         """Snapshot of learned per-Area-pair transit timing (docs/DECISIONS.md's
@@ -923,9 +982,23 @@ class OccupancyEngine:
         (nearest) layer — empty if none were ever found, so callers can tell
         "no real ambiguity" apart from "a genuine near-tie" (docs/DECISIONS.md's
         "uncertain births" entry needs exactly that distinction).
+
+        Whenever this resolves to a real `winner`, every decay-eligible Area
+        found empty anywhere along the way is credited a "found silent during
+        a resolved walk-through" observation (docs/DECISIONS.md's "per-Area
+        sensor reliability" entry) — real evidence someone was physically
+        there and that Area's own continuous-presence sensor(s) didn't catch
+        it. A deliberately simple, scoped approximation: every empty Area
+        visited during the search is credited, not just the ones on the one
+        true path to `winner` (this BFS doesn't track individual paths, only
+        distance layers) — a parallel dead-end branch occasionally gets
+        credited too, but only decay-eligible Areas are tracked at all, and
+        only a *repeated* pattern (`sensor_reliability_min_misses`) is ever
+        trusted, so a rare false credit doesn't skew the result.
         """
         visited = {area_id}
         frontier: dict[str, timedelta] = {area_id: timedelta(0)}
+        passed_through: set[str] = set()
         while frontier:
             candidates: dict[str, float] = {}
             next_frontier: dict[str, timedelta] = {}
@@ -940,6 +1013,8 @@ class OccupancyEngine:
                     if self._counts.get(other, 0) <= 0:
                         # Empty — not a candidate itself, but keep looking
                         # further out along this chain if nothing closer pans out.
+                        if other in self._graph.decay_eligible_area_ids:
+                            passed_through.add(other)
                         other_extension = extension
                         if self._graph.kind_of(other) is AreaKind.TRANSIT:
                             other_extension += self._config.transit_area_hop_extension
@@ -959,14 +1034,24 @@ class OccupancyEngine:
                     if score > 0:
                         candidates[other] = score
             if candidates:
+                winner: str | None
                 if len(candidates) == 1:
-                    return next(iter(candidates)), candidates
-                ranked = sorted(candidates.values(), reverse=True)
-                if ranked[0] - ranked[1] <= self._config.transit_score_tie_margin:
-                    return None, candidates  # too close to call
-                return max(candidates, key=lambda a: candidates[a]), candidates
+                    winner = next(iter(candidates))
+                else:
+                    ranked = sorted(candidates.values(), reverse=True)
+                    if ranked[0] - ranked[1] <= self._config.transit_score_tie_margin:
+                        winner = None  # too close to call
+                    else:
+                        winner = max(candidates, key=lambda a: candidates[a])
+                if winner is not None:
+                    self._record_pass_through_misses(passed_through)
+                return winner, candidates
             frontier = next_frontier
         return None, {}
+
+    def _record_pass_through_misses(self, area_ids: set[str]) -> None:
+        for area_id in area_ids:
+            self._area_miss_counts[area_id] = self._area_miss_counts.get(area_id, 0) + 1
 
     def _transit_plausibility_score(self, gap: timedelta, effective_window: timedelta) -> float:
         """How plausible `gap` is for the same person to have walked the distance

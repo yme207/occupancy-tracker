@@ -200,5 +200,5 @@ class SignalIngestion:
             self._engine.expire_vacant_area(area_id, now)
 
         self._decay_timer_cancel[area_id] = async_call_later(
-            self._hass, self._engine.decay_grace_period, _fire
+            self._hass, self._engine.effective_decay_grace_period(area_id), _fire
         )

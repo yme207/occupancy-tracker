@@ -1193,16 +1193,28 @@ an interior candidate instead of a real arrival. 3 new tests (260 total), `ruff`
 clean. This was a well-bounded extension of already-decided, already-built machinery — no new product
 decisions needed.
 
-**Per-sensor reliability/miss-rate learning (the second scope limit) was deliberately not attempted**
-— unlike every other recommendation in this whole line of work, it doesn't have an obvious "ground
-truth" signal to learn from. Transit timing had a clean one (whole-house count confidently at 1); a
-sensor's own *miss rate* would need some independent way to know "someone was actually here and this
-specific sensor failed to detect them," which nothing in the current design establishes — the closest
-candidate (a manual `override_occupant_count` correction contradicting what the sensor-based
-inference believed) is sparse and doesn't cleanly attribute blame to one specific sensor when an Area
-has several selected. This needs its own design conversation (what counts as ground truth, what a
-learned reliability score would actually change once known) before any implementation is attempted,
-not a guess — flagged rather than built.
+**Nineteenth** (2026-08-16): closed the second scope limit — per-Area sensor reliability learning.
+Deliberately left unbuilt after the "Eighteenth" entry until the project owner had the same kind of
+design conversation every other recommendation this session got: an `AskUserQuestion` exchange settled
+the ground-truth signal ("cross-check against transit-confirmed arrivals" — specifically, a decay-
+eligible Area found empty while a transit search walked straight through it on the way to a candidate
+the search then actually resolved against) and the effect ("widen `decay_grace_period`" for that
+specific Area, rather than exempt it from decay entirely or just flag it for manual review). See
+`docs/DECISIONS.md`'s new "Per-Area sensor reliability: learned decay-grace widening from confirmed
+pass-throughs" entry for the full design, including the one deliberate approximation (every empty
+decay-eligible Area visited during a resolved search gets credited, not strictly only the ones on the
+one true path — the BFS tracks distance layers, not individual paths). New `effective_decay_grace_
+period(area_id)` is what `signal_ingestion.py` now actually schedules the decay timer against;
+`learned_timing_store.py` (its module docstring now describes it as the general "learned engine-
+statistics store," covering both this and transit timing) persists the per-Area miss counts across
+restarts the same way transit timing already does, sharing one `Store`/file and one debounced-save
+listener. Surfaced in the topology panel's explainability payload as a new `decay_grace_widened`
+per-Area diagnostic. 10 new tests (270 total), `ruff`/`mypy`/`pytest` all clean. This closes out both
+scope limits noted after the four research recommendations — the whole research-driven line of work
+from earlier this session (background research pass -> 4 recommendations -> both scope limits) is now
+complete.
+1. **Per-sensor reliability/miss-rate learning (the second scope limit)** — closed, see "Nineteenth"
+   above.
 2. **Outdoor-Area-vs-total-occupancy decision** — resolved (see "Twelfth" above): a real
    `outside_area_ids` flag was built, excluding a flagged Area from `Total Occupant Count` while
    keeping it fully tracked otherwise.

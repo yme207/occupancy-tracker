@@ -172,6 +172,38 @@ async def test_decay_timer_scheduled_once_all_decay_eligible_evidence_goes_off(
     assert args[1] == timedelta(minutes=5)
 
 
+async def test_decay_timer_uses_the_widened_grace_period_for_an_unreliable_area(
+    hass: HomeAssistant,
+) -> None:
+    """docs/DECISIONS.md's "per-Area sensor reliability" entry: a decay-
+    eligible Area with enough accumulated "found silent during a resolved
+    walk-through" misses gets its own wider grace period scheduled, not the
+    flat default — same mechanism `test_decay_timer_scheduled_once_all_decay_
+    eligible_evidence_goes_off` exercises for the ordinary/reliable case.
+    """
+    config = EngineConfig(
+        decay_grace_period=timedelta(minutes=5),
+        sensor_reliability_min_misses=3,
+        unreliable_sensor_grace_multiplier=3.0,
+    )
+    engine = OccupancyEngine(_decay_graph(), config, learned_sensor_reliability={"landing": 3})
+    ingestion = SignalIngestion(hass, engine)
+    hass.states.async_set("binary_sensor.landing_presence", "on")
+    await hass.async_block_till_done()
+
+    topology = TopologyData(area_entity_selections={"landing": ("binary_sensor.landing_presence",)})
+    with patch(
+        "custom_components.occupancy_tracker.signal_ingestion.async_call_later"
+    ) as mock_call_later:
+        ingestion.async_start(topology)
+        hass.states.async_set("binary_sensor.landing_presence", "off")
+        await hass.async_block_till_done()
+
+    assert mock_call_later.call_count == 1
+    args, _ = mock_call_later.call_args
+    assert args[1] == timedelta(minutes=15)  # 5 * 3.0, not the flat 5
+
+
 async def test_decay_timer_not_scheduled_for_a_non_decay_eligible_area(
     hass: HomeAssistant,
 ) -> None:

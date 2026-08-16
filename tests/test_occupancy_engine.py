@@ -1382,3 +1382,130 @@ def test_egress_arrival_without_any_candidates_creates_no_uncertain_birth() -> N
     engine.process_signal(AreaActivitySignal("entryway", now, source="s1"))
 
     assert engine.uncertain_births(now) == ()
+
+
+# -- Per-Area sensor reliability (docs/DECISIONS.md's "per-Area sensor
+# reliability" entry) -------------------------------------------------------
+
+
+def _reliability_graph() -> HouseGraph:
+    """kitchen -- landing -- bedroom: `landing` is decay-eligible and always
+    empty of its own evidence, so a walk from kitchen to bedroom (or back)
+    can only ever be inferred by passing straight through it.
+    """
+    return HouseGraph(
+        area_ids=frozenset({"kitchen", "landing", "bedroom"}),
+        connectors=(
+            GraphConnector("c1", "kitchen", "landing"),
+            GraphConnector("c2", "landing", "bedroom"),
+        ),
+        decay_eligible_area_ids=frozenset({"landing"}),
+    )
+
+
+def _walk_kitchen_to_bedroom_via_empty_landing(
+    engine: OccupancyEngine, start: datetime, gap_seconds: float
+) -> None:
+    """One resolved kitchen -> bedroom transit that walks straight through
+    the empty, decay-eligible `landing` in between — landing's own sensor
+    never fires, exactly the "found silent during a resolved walk-through"
+    case docs/DECISIONS.md's "per-Area sensor reliability" entry tracks.
+    Resets to a clean kitchen-occupied slate first via manual overrides
+    (bypassing the search machinery, so resetting doesn't itself add extra
+    credit), so repeated calls each contribute exactly one credit.
+    """
+    engine.override_occupant_count("bedroom", 0, start)
+    engine.override_occupant_count("landing", 0, start)
+    engine.override_occupant_count("kitchen", 1, start)
+    engine.process_signal(
+        AreaActivitySignal("bedroom", start + timedelta(seconds=gap_seconds), source="s2")
+    )
+
+
+def test_learned_sensor_reliability_starts_empty() -> None:
+    engine = OccupancyEngine(_reliability_graph())
+
+    assert engine.learned_sensor_reliability() == {}
+
+
+def test_effective_decay_grace_period_defaults_to_the_flat_value() -> None:
+    config = EngineConfig(decay_grace_period=timedelta(minutes=5))
+    engine = OccupancyEngine(_reliability_graph(), config)
+
+    assert engine.effective_decay_grace_period("landing") == timedelta(minutes=5)
+
+
+def test_effective_decay_grace_period_ignores_a_non_decay_eligible_area() -> None:
+    """Even an Area outside `decay_eligible_area_ids` entirely (so nothing
+    could ever have credited it a miss) just gets the flat default back —
+    this is really testing the "not decay-eligible at all" early-out.
+    """
+    config = EngineConfig(decay_grace_period=timedelta(minutes=5))
+    engine = OccupancyEngine(_graph(("kitchen", "hallway")), config)
+
+    assert engine.effective_decay_grace_period("kitchen") == timedelta(minutes=5)
+
+
+def test_repeated_silent_walkthroughs_widen_the_decay_eligible_areas_grace_period() -> None:
+    config = EngineConfig(
+        decay_grace_period=timedelta(minutes=5),
+        sensor_reliability_min_misses=3,
+        unreliable_sensor_grace_multiplier=3.0,
+    )
+    engine = OccupancyEngine(_reliability_graph(), config)
+    t = T0
+    for _ in range(2):  # one short of the threshold
+        _walk_kitchen_to_bedroom_via_empty_landing(engine, t, gap_seconds=10.0)
+        t += timedelta(minutes=1)
+
+    assert engine.effective_decay_grace_period("landing") == timedelta(minutes=5)  # still flat
+    assert engine.learned_sensor_reliability() == {"landing": 2}
+
+    _walk_kitchen_to_bedroom_via_empty_landing(engine, t, gap_seconds=10.0)  # crosses the threshold
+
+    assert engine.learned_sensor_reliability() == {"landing": 3}
+    assert engine.effective_decay_grace_period("landing") == timedelta(minutes=15)  # 5 * 3.0
+
+
+def test_no_credit_when_the_search_never_resolves() -> None:
+    """A genuine tie isn't confirmation anyone actually walked through either
+    empty decay-eligible Area along the way — no credit for either.
+    """
+    graph = HouseGraph(
+        area_ids=frozenset({"landing", "passage_a", "passage_b", "kitchen", "study"}),
+        connectors=(
+            GraphConnector("c1", "landing", "passage_a"),
+            GraphConnector("c2", "passage_a", "kitchen"),
+            GraphConnector("c3", "landing", "passage_b"),
+            GraphConnector("c4", "passage_b", "study"),
+        ),
+        decay_eligible_area_ids=frozenset({"passage_a", "passage_b"}),
+    )
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=90))
+    engine = OccupancyEngine(graph, config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+
+    now = T0 + timedelta(seconds=10)  # identical gap via both branches — an exact tie
+    engine.process_signal(AreaActivitySignal("landing", now, source="s3"))
+
+    assert engine.area_state("landing", now).occupant_count == 1  # new occupant, not guessed
+    assert engine.learned_sensor_reliability() == {}
+
+
+def test_learned_sensor_reliability_can_be_seeded_at_construction() -> None:
+    """Feeding a prior snapshot back in (docs/DECISIONS.md — how the
+    HA-dependent persistence layer resumes tracking after a restart)
+    reproduces the same widened grace period without needing to re-observe.
+    """
+    config = EngineConfig(
+        decay_grace_period=timedelta(minutes=5),
+        sensor_reliability_min_misses=3,
+        unreliable_sensor_grace_multiplier=3.0,
+    )
+    engine = OccupancyEngine(
+        _reliability_graph(), config, learned_sensor_reliability={"landing": 5}
+    )
+
+    assert engine.learned_sensor_reliability() == {"landing": 5}
+    assert engine.effective_decay_grace_period("landing") == timedelta(minutes=15)

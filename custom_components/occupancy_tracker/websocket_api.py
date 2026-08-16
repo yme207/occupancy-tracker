@@ -190,6 +190,16 @@ def _engine_state_json(engine: OccupancyEngine) -> dict[str, Any]:
                 # currently resolves to without re-deriving the inference
                 # itself.
                 "area_kind": engine.graph.kind_of(area_id).name.lower(),
+                # True once this Area's own continuous-presence sensor(s)
+                # have been caught missing someone often enough
+                # (docs/DECISIONS.md's "per-Area sensor reliability" entry)
+                # that its decay grace period has widened beyond the flat
+                # default — diagnostic only, so the panel can explain why a
+                # decay-eligible Area is taking longer than usual to
+                # auto-clear.
+                "decay_grace_widened": (
+                    engine.effective_decay_grace_period(area_id) > engine.decay_grace_period
+                ),
             }
             for area_id, state in engine.all_area_states(now).items()
         },

@@ -262,16 +262,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
     )
     graph = build_house_graph(registry_sync.house_shape, topology_store.topology)
     # Seeded from whatever this house has already learned (docs/DECISIONS.md's
-    # "learned transit timing" entry) — resumes refining from where it left
-    # off across a restart/reload rather than forgetting it every time.
-    engine = OccupancyEngine(graph, engine_config, learned_timing_store.data)
+    # "learned transit timing" and "per-Area sensor reliability" entries) —
+    # resumes refining from where it left off across a restart/reload rather
+    # than forgetting it every time.
+    engine = OccupancyEngine(
+        graph,
+        engine_config,
+        learned_timing_store.data,
+        learned_timing_store.sensor_reliability,
+    )
     # Any signal could have recorded a new learned sample — schedule a
     # (debounced, see learned_timing_store.py) save after every one, rather
     # than trying to detect specifically which signals actually learned
     # something; a redundant save of unchanged data is harmless.
     entry.async_on_unload(
         engine.add_listener(
-            lambda: learned_timing_store.async_schedule_save(engine.learned_transit_times)
+            lambda: learned_timing_store.async_schedule_save(
+                engine.learned_transit_times, engine.learned_sensor_reliability
+            )
         )
     )
 

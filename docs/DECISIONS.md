@@ -14,6 +14,56 @@ Format:
 
 ---
 
+## 2026-08-16 — Per-Area sensor reliability: learned decay-grace widening from confirmed pass-throughs
+**Decision:** Closes the second scope limit noted after the research-recommendation work (the first,
+egress-arrival reattribution, closed earlier the same day — see below). `OccupancyEngine` now learns,
+per decay-eligible Area, how often that Area has been found *empty* while a transit search walked
+straight through it on the way to a candidate that the search then actually resolved against — real
+evidence someone was physically there and that Area's own continuous-presence sensor(s) didn't catch
+it. `_search_plausible_transit_sources` already walks transparently through empty Areas
+(`docs/DECISIONS.md`'s original transit-inference entries); it now also collects which of those
+empty Areas are decay-eligible, and — only once the *overall* search actually resolves to a winner,
+never on an unresolved/ambiguous search — credits each of them one "found silent during a resolved
+walk-through" observation (`_record_pass_through_misses`). Once a specific Area crosses
+`sensor_reliability_min_misses` (default 3) such observations, `effective_decay_grace_period(area_id)`
+returns `decay_grace_period * unreliable_sensor_grace_multiplier` (default 3x) for it instead of the
+flat default; `signal_ingestion.py`'s `_schedule_decay_timer` now schedules against this per-Area
+value rather than the engine-wide flat one. Persisted across restarts via
+`learned_timing_store.py` (renamed in spirit, not in module path, to "learned engine-statistics
+store" — it already existed for learned transit timing and shares that data's lifecycle exactly:
+engine-owned, not user-authored, saved together off the same `add_listener` callback). Seeded at
+construction (`OccupancyEngine`'s new `learned_sensor_reliability` argument), snapshotted via
+`learned_sensor_reliability()`, surfaced in the topology panel's explainability view as
+`decay_grace_widened` per Area.
+
+Deliberately a simple, scoped approximation, consistent with how every other recommendation this
+session was scoped down from the full generalized version: the BFS credits *every* empty
+decay-eligible Area it visits during a resolved search, not strictly only the ones on the one true
+path to the winner (the search tracks distance layers, not individual paths, so a parallel dead-end
+branch occasionally gets credited too). This is accepted because only decay-eligible Areas
+(verified `device_class: occupancy`, already the most trustworthy evidence class) are ever tracked at
+all, and only a *repeated* pattern is ever trusted (`sensor_reliability_min_misses`) — a rare false
+credit doesn't skew the result the way it would for a single-observation trigger.
+
+**Why:** The project owner chose the ground-truth signal ("cross-check against transit-confirmed
+arrivals") and the effect ("widen `decay_grace_period`") via `AskUserQuestion` after I'd flagged, when
+closing scope limit 1, that per-sensor reliability learning has no clean self-labeling ground truth
+the way transit timing does (a manual `override_occupant_count` correction doesn't cleanly attribute
+blame to one specific sensor in a multi-sensor room) — a genuinely new design decision needing its own
+conversation, not something to guess at. A resolved multi-hop search walking straight through an
+Area's *own* continuous-presence sensor without it ever firing is the cleanest available signal:
+"resolved" already means the engine is confident someone made the trip, so a silent decay-eligible
+Area along the way is real, if imperfect, evidence about that Area's specific sensor(s) — not a
+guess layered on a guess.
+**Alternatives considered:** Per-*entity* (not per-Area) reliability — rejected as more precise but
+unbuildable cleanly: the engine reasons in Areas, not individual entity ids, and a multi-sensor Area
+has no way to tell which specific sensor should have fired. Down-weighting/exempting the Area from
+decay eligibility entirely, or just surfacing a `needs_review`-style flag with no behavior change —
+both considered and offered to the project owner; they chose the middle option (widen the grace
+period) as the one that actually addresses the failure mode (a proven-spotty sensor's "off" reading
+shouldn't be trusted as quickly as a reliable one's) without fully disabling decay for an Area that's
+still mostly working.
+
 ## 2026-08-16 — Uncertain births extended to egress-arrival reattribution
 **Decision:** Closes the deliberate scope limit noted in the original "uncertain births" entry.
 `_confirm_transit`'s egress-arrival reattribution (an ambiguous door confirmation that could be a

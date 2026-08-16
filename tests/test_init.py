@@ -58,12 +58,15 @@ async def test_setup_entry_seeds_engine_with_persisted_learned_transit_times(
     await hass.async_block_till_done()
 
     seeded = {frozenset({kitchen.id, hallway.id}): (6, 12.5, 0.0)}
-    await entry.runtime_data.learned_timing_store._store.async_save(learned_timing_to_dict(seeded))
+    await entry.runtime_data.learned_timing_store._store.async_save(
+        learned_timing_to_dict(seeded, {kitchen.id: 4})
+    )
 
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
 
     assert entry.runtime_data.engine.learned_transit_times() == seeded
+    assert entry.runtime_data.engine.learned_sensor_reliability() == {kitchen.id: 4}
 
 
 async def test_setup_entry_registers_a_device_linking_back_to_the_panel(
