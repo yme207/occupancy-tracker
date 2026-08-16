@@ -1176,10 +1176,12 @@ class OccupancyTrackerTopologyPanel extends LitElement {
         <ha-icon icon="mdi:transit-connection-variant"></ha-icon> How this room counts
       </p>
       <p class="muted">
-        A hallway or stairwell with no sensors of its own gets extra time before a slow walk
-        through it looks like a second person — a room people actually spend time in doesn't. Home
-        Assistant guesses which this is from how the room connects to others; override it here if
-        it guesses wrong.
+        A room that connects two or more others and has no sensors selected of its own is treated
+        as a passage automatically — it gets extra time before a slow walk through it looks like a
+        second person, since nothing confirms someone's there directly. A room with its own sensors
+        selected is treated as somewhere people actually spend time, even if it's a hallway or
+        stairwell. If a sensored passage like that still sometimes gets missed mid-walk, switch it
+        to Passage yourself below.
       </p>
       <div class="segmented" role="group" aria-label="How this room counts">
         ${this._renderAreaKindOption(area.area_id, null, "Auto", override)}
