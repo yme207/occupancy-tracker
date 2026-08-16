@@ -26,6 +26,7 @@ from custom_components.occupancy_tracker.const import (
     CONF_TRACKED_PERSONS,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
 )
+from custom_components.occupancy_tracker.learned_timing_store import learned_timing_to_dict
 from custom_components.occupancy_tracker.topology_store import Connector, TopologyData
 
 
@@ -40,6 +41,29 @@ async def test_setup_entry_wires_up_runtime_data(
 
     assert entry.state is ConfigEntryState.LOADED
     assert isinstance(entry.runtime_data, OccupancyTrackerRuntimeData)
+
+
+async def test_setup_entry_seeds_engine_with_persisted_learned_transit_times(
+    hass: HomeAssistant, area_registry: ar.AreaRegistry, enable_custom_integrations: None
+) -> None:
+    """docs/DECISIONS.md's "learned transit timing" entry: previously
+    learned data survives a reload (mirrors what a real HA restart does)
+    and is fed straight into the new engine instance, not lost.
+    """
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    hallway = area_registry.async_get_or_create("Hallway")
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    seeded = {frozenset({kitchen.id, hallway.id}): (6, 12.5, 0.0)}
+    await entry.runtime_data.learned_timing_store._store.async_save(learned_timing_to_dict(seeded))
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.engine.learned_transit_times() == seeded
 
 
 async def test_setup_entry_registers_a_device_linking_back_to_the_panel(

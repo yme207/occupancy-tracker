@@ -14,6 +14,67 @@ Format:
 
 ---
 
+## 2026-08-16 — Learned transit timing: per-Area-pair, fully replaces the flat default, persisted
+**Decision:** Recommendation #4, the last of the four research recommendations, and the one that
+depended on #2/#3's machinery existing first (per the research report itself). `OccupancyEngine`
+now learns its own per-Area-pair typical transit time from the house's own history, and — per the
+project owner's explicit instruction — **fully replaces** the flat, generic
+`transit_confirmation_window`-based formula for a pair once it has enough real data, rather than
+just widening it (see "Alternatives considered" for the earlier, wrong instinct this corrects).
+
+A new `_TransitTimeStats` (pure Python, Welford's online algorithm — numerically stable running
+mean/variance, no numpy/scipy dependency) tracks `(count, mean_seconds, m2_seconds)` per unordered
+Area pair. A sample is recorded only for the cleanest possible evidence: `_handle_area_activity`'s
+interior-fallback path resolving to a *single, unambiguous* candidate (no near-tie — those go to
+"uncertain births" instead, not learning) *and* the whole house's `total_occupant_count` was exactly
+1 immediately before the event — completely self-labeling data, no guessing about ground truth
+required. Once a pair reaches `EngineConfig.transit_learning_min_samples` (5, not user-facing) real
+samples, `_effective_transit_window` uses `mean + transit_learning_stddev_margin (2.0, not
+user-facing) * stddev` as that pair's effective window *instead of* the flat formula — including
+tightening below it, when a pair's real timing genuinely supports that. Below the threshold, the
+flat formula is the only reasonable estimate (an unavoidable bootstrap floor, not a permanent hedge
+against the learned data — once real data exists, it takes over completely). The existing scored-
+timing tapering (`transit_grace_fraction`) from the earlier "scored transit timing" entry still
+applies on top of whichever effective window is chosen, learned or flat, so even a tight learned
+window still degrades gracefully rather than hard-cutting off.
+
+**Persisted across restarts**, per the project owner's explicit choice this time (unlike recommendation
+#3's uncertain births, deliberately left unpersisted) — genuinely accumulated, house-specific learning
+built up over weeks is exactly the kind of state actually worth keeping. New `learned_timing_store.py`
+(a separate `Store`/module from `topology_store.py` — different owner, different lifecycle, no reason
+to couple their schemas) persists via `Store.async_delay_save` (verified from `helpers/storage.py`
+source: `data_func` is called at *actual write time*, not when scheduled, and repeated calls within
+the delay window coalesce into one write) rather than `async_save`, so a burst of activity walking
+through several rooms doesn't mean a disk write per hop. `__init__.py` loads it before constructing
+the engine, seeds `OccupancyEngine(graph, config, learned_timing_store.data)`, and registers an
+`engine.add_listener()` callback that schedules a debounced save after every signal (cheap even when
+redundant — nothing new to detect). `reconcile()` strips learned pairs referencing a since-deleted
+Area, mirroring `TopologyStore`'s own hygiene pattern.
+
+22 new tests (257 total: engine unit tests for Welford correctness, the below-threshold/at-threshold
+boundary, both tightening and widening once learned, and constructor-seeding; a new
+`tests/test_learned_timing_store.py` for the persistence format and debounced-save contract; an
+`__init__.py` integration test proving seeded data survives a reload) plus the store module itself,
+`ruff`/`mypy`/`pytest` all clean.
+
+**Why:** The project owner pushed back directly on an initial "blend: use whichever is more generous"
+framing, correctly pointing out that hedging against the learned data forever (rather than only
+during the unavoidable zero-samples bootstrap period) defeated the actual point of "self-tuning" —
+and confirmed they specifically want tightening, not just widening, plus real persistence, both
+stronger asks than the original recommendation's own softer framing. Both were implemented exactly
+as asked once the request was unambiguous.
+**Alternatives considered:** The first framing offered to the project owner — permanently taking
+`max(learned, flat_default)`, never allowing a learned value to go below the flat default — was
+rejected by them specifically, and rightly: it would have meant a genuinely fast, consistent room
+pair could never get a correspondingly tight window, undermining the actual precision "learning"
+is supposed to deliver. Learning from *any* transit resolution (including near-ties and
+egress-anchor-adjacent cases) instead of only the cleanest whole-house-count-of-1 signal — rejected
+to avoid training on data that might itself be wrong, keeping this consistent with the "uncertain
+births" entry's own preference for the safest available signal. Per-sensor reliability/miss-rate
+learning (the research report's other, separate #4 sub-idea) — out of scope for this pass, a
+genuinely different statistical problem (sensor trustworthiness, not room-to-room timing) worth its
+own future design conversation, not folded in here.
+
 ## 2026-08-16 — Uncertain births: a scoped, bounded implementation of research recommendation #3
 **Decision:** Recommendation #3 ("track several weighted possibilities instead of one") is
 implemented here as **uncertain-birth tracking**, deliberately narrower than a full generalized

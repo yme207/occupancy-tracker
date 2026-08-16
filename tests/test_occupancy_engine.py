@@ -1133,3 +1133,168 @@ def test_override_occupant_count_discards_a_birth_referencing_it_as_a_candidate(
     engine.override_occupant_count("kitchen", 0, now)  # e.g. user confirms kitchen is empty
 
     assert engine.uncertain_births(now) == ()
+
+
+# -- Learned transit timing (docs/DECISIONS.md's "learned transit timing" entry) --
+
+
+def _walk_kitchen_to_hallway(engine: OccupancyEngine, start: datetime, gap_seconds: float) -> None:
+    """One clean, unambiguous, whole-house-count-of-1 kitchen -> hallway
+    transit, learnable per docs/DECISIONS.md — settle in kitchen, then
+    (fully departing so the pair starts back at 0 occupants) arrive in
+    hallway `gap_seconds` later.
+    """
+    engine.process_signal(AreaActivitySignal("kitchen", start, source="s1"))
+    engine.process_signal(
+        AreaActivitySignal("hallway", start + timedelta(seconds=gap_seconds), source="s2")
+    )
+    # Walk back so the next call starts from a clean, single-occupant slate.
+    engine.override_occupant_count("hallway", 0, start + timedelta(seconds=gap_seconds + 1))
+
+
+def test_learned_transit_times_starts_empty() -> None:
+    engine = OccupancyEngine(_graph(("kitchen", "hallway")))
+
+    assert engine.learned_transit_times() == {}
+
+
+def test_no_sample_recorded_when_more_than_one_occupant_in_the_house() -> None:
+    """docs/DECISIONS.md: only a whole-house-count-of-1 transit is
+    unambiguous enough to learn from.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway", "study"), (connector,)))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s0"))  # a second occupant
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("hallway", T0 + timedelta(seconds=10), source="s2"))
+
+    assert engine.learned_transit_times() == {}
+
+
+def test_learned_transit_times_accumulates_clean_samples() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    t = T0
+    for _ in range(3):
+        _walk_kitchen_to_hallway(engine, t, gap_seconds=10.0)
+        t += timedelta(minutes=1)
+
+    learned = engine.learned_transit_times()
+    assert len(learned) == 1
+    count, mean_seconds, _m2 = next(iter(learned.values()))
+    assert count == 3
+    assert mean_seconds == pytest.approx(10.0)
+
+
+def test_effective_window_stays_generic_below_the_learning_threshold() -> None:
+    """Fewer than transit_learning_min_samples (default 5) real
+    observations — nothing to trust yet, the flat formula still applies.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(
+        transit_confirmation_window=timedelta(seconds=90), transit_learning_min_samples=5
+    )
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    t = T0
+    for _ in range(4):  # one short of the threshold
+        _walk_kitchen_to_hallway(engine, t, gap_seconds=10.0)
+        t += timedelta(minutes=1)
+
+    # A gap far beyond the learned mean (10s) but still within the flat 90s
+    # window must still resolve as a continued transit — proving the flat
+    # formula, not a premature learned one, is still in effect.
+    engine.process_signal(AreaActivitySignal("kitchen", t, source="s1"))
+    arrival = t + timedelta(seconds=80)
+    engine.process_signal(AreaActivitySignal("hallway", arrival, source="s2"))
+
+    assert engine.area_state("hallway", arrival).occupant_count == 1
+    assert engine.area_state("kitchen", arrival).occupant_count == 0
+
+
+def test_effective_window_tightens_below_the_generic_default_once_learned() -> None:
+    """The core "fully replace, including tightening" behavior: once
+    kitchen<->hallway has enough learned samples clustered tightly around a
+    short real time, a gap that the flat 90s default would have accepted is
+    now correctly read as implausible for *this* pair — someone else,
+    unrelated, not a continuation of the same short hop.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(
+        transit_confirmation_window=timedelta(seconds=90),
+        transit_learning_min_samples=5,
+        transit_learning_stddev_margin=2.0,
+    )
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    t = T0
+    for _ in range(6):  # comfortably past the threshold, tight/consistent timing
+        _walk_kitchen_to_hallway(engine, t, gap_seconds=5.0)
+        t += timedelta(minutes=1)
+
+    # 60s is well inside the flat 90s window, but far past a learned
+    # ~5s-typical, tightly-consistent pair's own effective window.
+    engine.process_signal(AreaActivitySignal("kitchen", t, source="s1"))
+    arrival = t + timedelta(seconds=60)
+    engine.process_signal(AreaActivitySignal("hallway", arrival, source="s2"))
+
+    assert engine.area_state("kitchen", arrival).occupant_count == 1  # untouched
+    assert engine.area_state("hallway", arrival).occupant_count == 1  # a new, unrelated occupant
+    assert engine.total_occupant_count(arrival) == 2
+
+
+def test_effective_window_widens_beyond_the_generic_default_once_learned() -> None:
+    """The flip side: a pair with genuinely *variable* real transit times
+    (sometimes quick, sometimes someone dawdles) gets a wider learned
+    window (mean + a safety margin of standard deviations) than a flat
+    default tuned only for the "usual" case — catching a slow-but-genuine
+    transit the flat formula alone wouldn't have. Each individual bootstrap
+    sample still has to resolve under the *flat* window first (learning
+    can only observe transits the engine already recognized), so this uses
+    realistic variance rather than an oversized mean to demonstrate
+    widening without that chicken-and-egg problem.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(
+        transit_confirmation_window=timedelta(seconds=70),
+        transit_grace_fraction=0.0,  # isolate the learned-window effect
+        transit_learning_min_samples=5,
+        transit_learning_stddev_margin=2.0,
+    )
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    t = T0
+    # Alternating quick/slow genuine walks — each individual gap comfortably
+    # resolves under the flat 70s window, but the resulting mean (35s) plus
+    # 2 standard deviations (~27.4s) works out to a learned window (~89.8s)
+    # wider than the flat default alone ever was.
+    for gap in (10.0, 60.0, 10.0, 60.0, 10.0, 60.0):
+        _walk_kitchen_to_hallway(engine, t, gap_seconds=gap)
+        t += timedelta(minutes=5)
+
+    engine.process_signal(AreaActivitySignal("kitchen", t, source="s1"))
+    arrival = t + timedelta(seconds=85)  # past the flat 70s window, within the learned ~89.8s one
+    engine.process_signal(AreaActivitySignal("hallway", arrival, source="s2"))
+
+    assert engine.area_state("kitchen", arrival).occupant_count == 0  # correctly resolved
+    assert engine.area_state("hallway", arrival).occupant_count == 1
+    assert engine.total_occupant_count(arrival) == 1
+
+
+def test_learned_transit_times_can_be_seeded_at_construction() -> None:
+    """Feeding a prior snapshot back in (docs/DECISIONS.md — how the
+    HA-dependent persistence layer resumes learning after a restart)
+    reproduces the same learned behavior without needing to relearn.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(
+        transit_confirmation_window=timedelta(seconds=90), transit_learning_min_samples=5
+    )
+    seed = {frozenset({"kitchen", "hallway"}): (6, 5.0, 0.0)}  # 6 samples, mean 5s, zero variance
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config, seed)
+
+    assert engine.learned_transit_times() == seed
+
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    far_past_learned = T0 + timedelta(seconds=60)  # within the flat window, past the learned one
+    engine.process_signal(AreaActivitySignal("hallway", far_past_learned, source="s2"))
+
+    assert engine.area_state("kitchen", far_past_learned).occupant_count == 1  # untouched
+    assert engine.area_state("hallway", far_past_learned).occupant_count == 1  # new, unrelated

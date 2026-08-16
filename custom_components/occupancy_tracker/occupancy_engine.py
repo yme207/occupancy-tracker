@@ -12,6 +12,7 @@ instance to those layers).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -268,6 +269,21 @@ class EngineConfig:
     #: permanent, unresolved new occupant, same as today's behavior) if a new
     #: one would exceed this. Internal tuning knob, not exposed to users.
     max_uncertain_births: int = 8
+    #: Minimum number of clean, unambiguous samples (docs/DECISIONS.md's
+    #: "learned transit timing" entry) a specific pair of Areas needs before
+    #: its own learned typical transit time is trusted *instead of* the flat
+    #: `transit_confirmation_window`-based formula, not just alongside it —
+    #: below this, there's nothing real to learn from yet, so the existing
+    #: formula is the only reasonable estimate. Internal tuning knob, not
+    #: exposed to users.
+    transit_learning_min_samples: int = 5
+    #: Safety margin (in standard deviations) added on top of a learned
+    #: pair's mean transit time to get its effective window, once trusted
+    #: (docs/DECISIONS.md's "learned transit timing" entry) — real transit
+    #: times vary walk to walk, so using the bare mean alone would reject
+    #: roughly half of all genuine transits for that pair. Internal tuning
+    #: knob, not exposed to users.
+    transit_learning_stddev_margin: float = 2.0
     #: How long a decay-eligible Area's continuous-presence evidence must
     #: stay off, with nothing else explaining continued occupancy, before
     #: `expire_vacant_area` clears it (docs/DECISIONS.md's decay entry).
@@ -316,10 +332,47 @@ class _UncertainBirthRecord:
     created_at: datetime
 
 
+@dataclass(slots=True)
+class _TransitTimeStats:
+    """Running statistics of how long a real, unambiguous transit between two
+    Areas has actually taken in this house (docs/DECISIONS.md's "learned
+    transit timing" entry) — updated via Welford's online algorithm (pure
+    Python, numerically stable, no numpy/scipy dependency) rather than
+    storing every raw sample.
+    """
+
+    count: int = 0
+    mean_seconds: float = 0.0
+    #: Sum of squared differences from the running mean (Welford's "M2") —
+    #: the form that's actually numerically stable to update incrementally;
+    #: `stddev_seconds` is derived from it, not stored directly, since
+    #: storing a derived stddev and *not* M2 would make round-tripping
+    #: through persistence lossy.
+    m2_seconds: float = 0.0
+
+    def add_sample(self, seconds: float) -> None:
+        self.count += 1
+        delta = seconds - self.mean_seconds
+        self.mean_seconds += delta / self.count
+        delta2 = seconds - self.mean_seconds
+        self.m2_seconds += delta * delta2
+
+    @property
+    def stddev_seconds(self) -> float:
+        if self.count < 2:
+            return 0.0
+        return math.sqrt(self.m2_seconds / (self.count - 1))
+
+
 class OccupancyEngine:
     """The latch/transit-inference state machine (SPEC.md §6.2-§6.5)."""
 
-    def __init__(self, graph: HouseGraph, config: EngineConfig | None = None) -> None:
+    def __init__(
+        self,
+        graph: HouseGraph,
+        config: EngineConfig | None = None,
+        learned_transit_times: Mapping[frozenset[str], tuple[int, float, float]] | None = None,
+    ) -> None:
         self._graph = graph
         self._config = config or EngineConfig()
         self._counts: dict[str, int] = dict.fromkeys(graph.area_ids, 0)
@@ -327,6 +380,16 @@ class OccupancyEngine:
         self._last_provenance: dict[str, ProvenanceTier | None] = dict.fromkeys(graph.area_ids)
         self._pending: dict[str, _PendingTransit] = {}
         self._listeners: list[Callable[[], None]] = []
+        #: Learned per-Area-pair transit timing (docs/DECISIONS.md's
+        #: "learned transit timing" entry), keyed by the unordered pair —
+        #: seeded from `learned_transit_times` (persisted by the HA-dependent
+        #: layer, this module stays HA-import-free) as `(count, mean_seconds,
+        #: m2_seconds)` triples, since the engine has no way to load its own
+        #: `Store` data.
+        self._transit_time_stats: dict[frozenset[str], _TransitTimeStats] = {
+            key: _TransitTimeStats(count=count, mean_seconds=mean, m2_seconds=m2)
+            for key, (count, mean, m2) in (learned_transit_times or {}).items()
+        }
         #: Whole-house total as reconstructed purely from confirmed door
         #: crossings and confirmed corrections (docs/DECISIONS.md's "whole-
         #: house conservation" entry) — `None` until the first such event
@@ -389,6 +452,19 @@ class OccupancyEngine:
         Area's evidence goes fully quiet, before calling `expire_vacant_area`.
         """
         return self._config.decay_grace_period
+
+    def learned_transit_times(self) -> dict[frozenset[str], tuple[int, float, float]]:
+        """Snapshot of learned per-Area-pair transit timing (docs/DECISIONS.md's
+        "learned transit timing" entry), as `(count, mean_seconds, m2_seconds)`
+        triples — for the HA-dependent layer to persist (this module has no
+        `Store` access of its own) and for diagnostics. Feed straight back
+        into a new `OccupancyEngine`'s `learned_transit_times` constructor
+        argument to resume learning from where it left off.
+        """
+        return {
+            key: (stats.count, stats.mean_seconds, stats.m2_seconds)
+            for key, stats in self._transit_time_stats.items()
+        }
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Register a callback invoked after any Signal changes belief state.
@@ -621,6 +697,37 @@ class OccupancyEngine:
             )
         )
 
+    def _record_transit_time_sample(self, area_a: str, area_b: str, gap: timedelta) -> None:
+        """Learn one real, unambiguous transit-time observation between two
+        Areas (docs/DECISIONS.md's "learned transit timing" entry).
+        """
+        key = frozenset({area_a, area_b})
+        stats = self._transit_time_stats.setdefault(key, _TransitTimeStats())
+        stats.add_sample(gap.total_seconds())
+
+    def _effective_transit_window(
+        self, area_a: str, area_b: str, generic_window: timedelta
+    ) -> timedelta:
+        """The timing budget to judge a transit between these two Areas
+        against (docs/DECISIONS.md's "learned transit timing" entry): once
+        this specific pair has `transit_learning_min_samples` real, learned
+        observations, its own learned typical time (mean + a safety margin
+        of standard deviations) *replaces* `generic_window` entirely rather
+        than just supplementing it — including tightening below it, if
+        that's what this house's real walking times actually support. Below
+        that sample count, there's nothing real to learn from yet, so
+        `generic_window` (the flat, config-driven formula) is the only
+        reasonable estimate.
+        """
+        stats = self._transit_time_stats.get(frozenset({area_a, area_b}))
+        if stats is None or stats.count < self._config.transit_learning_min_samples:
+            return generic_window
+        learned_seconds = (
+            stats.mean_seconds + self._config.transit_learning_stddev_margin * stats.stddev_seconds
+        )
+        min_seconds = self._config.min_transit_time.total_seconds()
+        return timedelta(seconds=max(learned_seconds, min_seconds))
+
     def _resolve_stale_uncertain_births(self, now: datetime) -> None:
         """Settle any uncertain birth that's sat unresolved for at least
         `EngineConfig.uncertain_birth_resolution_delay` (docs/DECISIONS.md's
@@ -687,6 +794,19 @@ class OccupancyEngine:
             # (see docs/DECISIONS.md).
             source, candidates = self._search_plausible_transit_sources(area_id, signal.timestamp)
             if source is not None:
+                last_confirmed_source = self._last_confirmed[source]
+                if sum(self._counts.values()) == 1 and last_confirmed_source is not None:
+                    # The whole house had exactly this one occupant before
+                    # this event — an unambiguous, self-labeling real
+                    # transit, safe to learn from (docs/DECISIONS.md's
+                    # "learned transit timing" entry). last_confirmed[source]
+                    # is never actually None here in practice — a
+                    # None-evidenced Area is never a candidate in the first
+                    # place (see the search below) — the check is just
+                    # defensive type-narrowing, not a real runtime case.
+                    self._record_transit_time_sample(
+                        source, area_id, signal.timestamp - last_confirmed_source
+                    )
                 self._counts[source] -= 1
                 self._counts[area_id] = 1
                 self._last_confirmed[source] = signal.timestamp
@@ -764,6 +884,13 @@ class OccupancyEngine:
         resolve a direction, don't guess" rule as before, generalized from
         exact ties to near-ties now that scores are continuous.
 
+        The window itself (`_effective_transit_window`) is this specific
+        pair's own *learned* typical time (docs/DECISIONS.md's "learned
+        transit timing" entry) once enough real, unambiguous observations
+        exist for it — replacing the flat, generic formula entirely rather
+        than just widening it, since real per-house, per-room-pair data is a
+        better estimate than one number shared across the whole house.
+
         Returns `(winner, candidates)`: `winner` is `None` whenever no
         candidate scored above zero *or* the top two were too close to call;
         `candidates` is every Area actually in contention at the decisive
@@ -798,7 +925,10 @@ class OccupancyEngine:
                     gap = now - last_confirmed
                     if gap < self._config.min_transit_time:
                         continue  # can't teleport — a second, distinct occupant instead
-                    effective_window = self._config.transit_confirmation_window + extension
+                    generic_window = self._config.transit_confirmation_window + extension
+                    effective_window = self._effective_transit_window(
+                        area_id, other, generic_window
+                    )
                     score = self._transit_plausibility_score(gap, effective_window)
                     if score > 0:
                         candidates[other] = score

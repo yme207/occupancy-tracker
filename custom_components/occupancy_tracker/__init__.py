@@ -39,6 +39,7 @@ from .const import (
     DOMAIN,
 )
 from .engine_adapter import build_house_graph
+from .learned_timing_store import LearnedTimingStore
 from .occupancy_engine import EngineConfig, OccupancyEngine
 from .panel import async_setup as async_setup_panel
 from .registry_sync import HouseShape, RegistrySync
@@ -57,6 +58,7 @@ class OccupancyTrackerRuntimeData:
 
     registry_sync: RegistrySync
     topology_store: TopologyStore
+    learned_timing_store: LearnedTimingStore
     engine: OccupancyEngine
     signal_ingestion: SignalIngestion
     zone_fusion: ZoneFusion
@@ -167,6 +169,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
     # then again on every live registry change (docs/SPEC.md §5.3).
     await topology_store.async_reconcile_and_save(registry_sync.house_shape)
 
+    learned_timing_store = LearnedTimingStore(hass, entry.entry_id)
+    await learned_timing_store.async_load()
+    learned_timing_store.reconcile(registry_sync.house_shape)
+
     _previous_house_shape = registry_sync.house_shape
 
     async def _reconcile_and_reload_if_stale(previous: HouseShape, current: HouseShape) -> None:
@@ -189,6 +195,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
         trigger a reload for no visible effect.
         """
         removed = await topology_store.async_reconcile_and_save(current)
+        learned_timing_store.reconcile(current)
         active = active_area_ids(topology_store.topology)
         renamed = any(
             area_id in previous.areas
@@ -254,7 +261,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
         household_size_hint=_household_size_hint_option(entry.options),
     )
     graph = build_house_graph(registry_sync.house_shape, topology_store.topology)
-    engine = OccupancyEngine(graph, engine_config)
+    # Seeded from whatever this house has already learned (docs/DECISIONS.md's
+    # "learned transit timing" entry) — resumes refining from where it left
+    # off across a restart/reload rather than forgetting it every time.
+    engine = OccupancyEngine(graph, engine_config, learned_timing_store.data)
+    # Any signal could have recorded a new learned sample — schedule a
+    # (debounced, see learned_timing_store.py) save after every one, rather
+    # than trying to detect specifically which signals actually learned
+    # something; a redundant save of unchanged data is harmless.
+    entry.async_on_unload(
+        engine.add_listener(
+            lambda: learned_timing_store.async_schedule_save(engine.learned_transit_times)
+        )
+    )
 
     signal_ingestion = SignalIngestion(hass, engine)
     signal_ingestion.async_start(topology_store.topology)
@@ -276,6 +295,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
     entry.runtime_data = OccupancyTrackerRuntimeData(
         registry_sync=registry_sync,
         topology_store=topology_store,
+        learned_timing_store=learned_timing_store,
         engine=engine,
         signal_ingestion=signal_ingestion,
         zone_fusion=zone_fusion,

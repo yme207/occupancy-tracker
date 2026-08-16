@@ -1166,22 +1166,32 @@ bug was caught by the very first resolution test failing: an early draft double-
 new occupant's own Area and the candidate on resolution — fixed to only drain the candidate, matching
 how an ordinary transit already works.
 
-**Not built this round**: recommendation #4 (learning per-edge/per-sensor timing parameters from the
-house's own history) — per the research report itself, this depends on #3's scoring/candidate
-machinery existing first, which it now does; a natural next slice, not started. Also not extended in
-this pass: uncertain-birth tracking only covers `_handle_area_activity`'s interior-fallback path, not
-`_confirm_transit`'s egress-arrival reattribution — a deliberate scope limit, see DECISIONS.md's
-"Alternatives considered."
+Also not extended in the "Sixteenth" pass: uncertain-birth tracking only covers
+`_handle_area_activity`'s interior-fallback path, not `_confirm_transit`'s egress-arrival
+reattribution — a deliberate scope limit, see DECISIONS.md's "Alternatives considered."
+
+**Seventeenth** (2026-08-16): recommendation #4, the last of the four research recommendations, built
+end to end — see `docs/DECISIONS.md`'s new "Learned transit timing: per-Area-pair, fully replaces the
+flat default, persisted" entry for the full design. `OccupancyEngine` now learns each Area pair's own
+typical transit time from the house's real history (Welford's algorithm, pure Python, no new
+dependency), recording a sample only from the cleanest possible evidence (a single unambiguous
+transit while the whole house is confidently at exactly 1 occupant). The project owner explicitly
+corrected an initial "blend with the flat default forever" framing — the shipped behavior fully
+replaces the flat window once a pair has enough data (5 samples), including tightening below it, and
+persists across restarts via a new `learned_timing_store.py` (a separate `Store`, debounced writes via
+`Store.async_delay_save`, verified from source). 22 new tests (257 total), `ruff`/`mypy`/`pytest` all
+clean. This closes out all four research recommendations from the background research pass earlier
+this session — #1 (whole-house conservation), #2 (scored timing), #3 (uncertain-birth
+self-correction), #4 (learned timing) are all built, tested, and documented.
 
 Remaining, not blocking either half of this session's work:
 
-1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth"/"Fourteenth"/"Fifteenth"/
-   "Sixteenth" above)** — the timing/area-kind-scaling half, the decay half, the topology-panel UI for
-   both new topology fields, whole-house conservation (#1), scored transit timing (#2), and uncertain-
-   birth self-correction (#3) are all now built and tested; only live-browser verification remains for
-   the UI pieces (see "Thirteenth"). Still open: recommendation #4 (learned per-edge/per-sensor timing
-   parameters) — a smaller remaining piece now that #3 exists, not started; and extending uncertain-birth
-   tracking to the egress-arrival path, a documented, deliberate scope limit from this round.
+1. **Transit-timing rework (see "Ninth" through "Seventeenth" above)** — the timing/area-kind-scaling
+   half, the decay half, the topology-panel UI for both new topology fields, and all four research
+   recommendations (#1-#4) are now built and tested; only live-browser verification remains for the UI
+   pieces (see "Thirteenth"). Still open, deliberately not attempted: extending uncertain-birth tracking
+   to the egress-arrival path, and per-sensor reliability/miss-rate learning (a separate statistical
+   problem from the per-edge timing just built) — both documented scope limits, not started.
 2. **Outdoor-Area-vs-total-occupancy decision** — resolved (see "Twelfth" above): a real
    `outside_area_ids` flag was built, excluding a flagged Area from `Total Occupant Count` while
    keeping it fully tracked otherwise.
