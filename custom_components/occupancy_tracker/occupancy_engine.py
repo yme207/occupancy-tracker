@@ -257,6 +257,13 @@ class OccupancyEngine:
         self._last_provenance: dict[str, ProvenanceTier | None] = dict.fromkeys(graph.area_ids)
         self._pending: dict[str, _PendingTransit] = {}
         self._listeners: list[Callable[[], None]] = []
+        #: Whole-house total as reconstructed purely from confirmed door
+        #: crossings and confirmed corrections (docs/DECISIONS.md's "whole-
+        #: house conservation" entry) — `None` until the first such event
+        #: ever happens, deliberately: a fresh install with people already
+        #: home must never be flagged as suspicious just because no door has
+        #: fired yet.
+        self._egress_anchor: int | None = None
 
     @property
     def graph(self) -> HouseGraph:
@@ -272,6 +279,35 @@ class OccupancyEngine:
     def household_size_hint(self) -> int | None:
         """The configured "typical household size" confidence hint (SPEC.md §6.4), if any."""
         return self._config.household_size_hint
+
+    @property
+    def egress_anchor_total(self) -> int | None:
+        """The whole-house total as reconstructed purely from confirmed door
+        crossings and confirmed corrections since the first such event
+        (docs/DECISIONS.md's "whole-house conservation" entry) — `None`
+        until at least one has happened.
+
+        Compare against `total_occupant_count()`: if the interior model's
+        total is higher, something is currently counted that no door
+        crossing (or correction) has ever explained — an informational
+        signal only. SPEC.md §6.4's "never reject or cap a count the
+        evidence actually supports" stays intact; nothing here ever changes
+        `total_occupant_count()`'s own value, this is a separate number to
+        compare it against.
+        """
+        return self._egress_anchor
+
+    def _note_egress_delta(self, delta: int) -> None:
+        """Adjust the egress anchor by `delta` (+1 a confirmed arrival from
+        OUTSIDE, -1 a confirmed departure) — call *before* applying the
+        corresponding change to `self._counts`, so establishing the anchor
+        for the first time (see `egress_anchor_total`'s docstring) snapshots
+        the interior total as it stood immediately before this event, and
+        the two then move together for this event's own effect.
+        """
+        if self._egress_anchor is None:
+            self._egress_anchor = sum(self._counts.values())
+        self._egress_anchor = max(0, self._egress_anchor + delta)
 
     @property
     def decay_grace_period(self) -> timedelta:
@@ -356,6 +392,15 @@ class OccupancyEngine:
         reasons about. Clears any pending transit touching this Area, since a manual correction is
         strictly more authoritative than an unresolved automatic guess about the same Area, and
         leaving it in place could otherwise later resolve the count elsewhere out from under it.
+
+        Deliberately does *not* touch the egress anchor (`egress_anchor_total`) — only a confirmed
+        door crossing moves it (docs/DECISIONS.md). A manual correction for an occupant who
+        genuinely came in through an untracked entrance (no door sensor on it at all) would, if this
+        *did* adjust the anchor, permanently hide that specific person from the "unexplained by
+        doors" check by folding them into the trusted baseline — but "unexplained by doors" is
+        simply, honestly true for them, forever, regardless of how confident the correction is.
+        Keeping the anchor door-crossing-only avoids that kind of silent laundering, at the cost of
+        the flag potentially staying on after a correction the user just confirmed is right.
         """
         if area_id not in self._counts:
             raise ValueError(f"Unknown area: {area_id!r}")
@@ -390,6 +435,9 @@ class OccupancyEngine:
         decay-eligible, or is already 0 — keeps this safe to call from a
         timer callback that might fire after the Area became ineligible or
         was already cleared some other way.
+
+        Deliberately does *not* touch the egress anchor either, same reasoning as
+        `override_occupant_count` — the anchor only ever moves on a confirmed door crossing.
         """
         if area_id not in self._graph.decay_eligible_area_ids:
             return
@@ -583,6 +631,7 @@ class OccupancyEngine:
             # corroborate, so unlike a regular transit this confirms
             # immediately rather than waiting on a pending window (see
             # docs/DECISIONS.md).
+            self._note_egress_delta(-1)
             self._counts[inside] -= 1
             self._last_confirmed[inside] = signal.timestamp
             self._last_provenance[inside] = signal.provenance
@@ -644,6 +693,12 @@ class OccupancyEngine:
             del self._pending[pending.connector_id]
             return
 
+        if source == OUTSIDE:
+            # A genuine arrival from OUTSIDE (not reattributed to an
+            # already-counted interior neighbor above) is exactly the kind
+            # of confirmed door-crossing evidence the egress anchor tracks —
+            # see `egress_anchor_total`'s docstring.
+            self._note_egress_delta(1)
         if source != OUTSIDE:
             self._counts[source] -= 1
             self._last_confirmed[source] = now

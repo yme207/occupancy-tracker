@@ -689,3 +689,160 @@ def test_needs_review_false_when_count_is_zero() -> None:
     engine = OccupancyEngine(_graph(("kitchen",)))
 
     assert engine.area_state("kitchen", T0 + timedelta(hours=24)).needs_review is False
+
+
+# -- egress_anchor_total / whole-house conservation (docs/DECISIONS.md) ------
+
+
+def test_egress_anchor_starts_unanchored() -> None:
+    """No door/phone evidence has ever happened yet — a fresh install with
+    people already home must not be flagged as suspicious.
+    """
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    assert engine.egress_anchor_total is None
+
+
+def test_egress_anchor_established_by_a_confirmed_departure() -> None:
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway",), (connector,)))
+    engine.process_signal(AreaActivitySignal("entryway", T0, source="s1"))
+    assert engine.egress_anchor_total is None  # still no door evidence yet
+
+    left = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", left, source="binary_sensor.front_door")
+    )
+
+    assert engine.egress_anchor_total == 0
+    assert engine.total_occupant_count(left) == 0
+
+
+def test_egress_anchor_established_by_a_confirmed_arrival() -> None:
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway",), (connector,)))
+    assert engine.egress_anchor_total is None
+
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    corroborated = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        AreaActivitySignal("entryway", corroborated, source="binary_sensor.entryway_motion")
+    )
+
+    assert engine.egress_anchor_total == 1
+    assert engine.total_occupant_count(corroborated) == 1
+
+
+def test_egress_anchor_unaffected_by_an_ordinary_interior_transit() -> None:
+    front_door = GraphConnector("front_door", "entryway", OUTSIDE)
+    hallway_link = GraphConnector("c1", "entryway", "hallway")
+    engine = OccupancyEngine(_graph(("entryway", "hallway"), (front_door, hallway_link)))
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    engine.process_signal(AreaActivitySignal("entryway", T0 + timedelta(seconds=5), source="s1"))
+    assert engine.egress_anchor_total == 1
+
+    moved = T0 + timedelta(seconds=10)
+    engine.process_signal(AreaActivitySignal("hallway", moved, source="s2"))
+
+    assert engine.egress_anchor_total == 1  # unchanged — an interior handoff, not a door crossing
+    assert engine.total_occupant_count(moved) == 1  # still matches: nothing unexplained
+
+
+def test_egress_anchor_diverges_from_an_ungrounded_interior_birth() -> None:
+    """The exact bug shape this anchor exists to surface: an interior signal
+    with no plausible source creates a brand-new occupant with no door
+    crossing behind it at all.
+    """
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway", "kitchen"), (connector,)))
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    engine.process_signal(AreaActivitySignal("entryway", T0 + timedelta(seconds=5), source="s1"))
+    assert engine.egress_anchor_total == 1
+
+    later = T0 + timedelta(hours=1)  # disconnected from entryway, no plausible source
+    engine.process_signal(AreaActivitySignal("kitchen", later, source="s2"))
+
+    assert engine.egress_anchor_total == 1  # untouched — no door crossing happened
+    assert engine.total_occupant_count(later) == 2  # interior model now believes 2: divergence
+
+
+def test_egress_anchor_unaffected_by_an_arrival_reattributed_to_a_neighbor() -> None:
+    """A door confirmation that turns out to be the same person already
+    counted in an adjacent Area (docs/DECISIONS.md's 2026-08-15 "egress-
+    arrival confirmation" entry) isn't a genuinely new arrival from OUTSIDE —
+    the anchor must stay untouched (and unestablished here, since this is
+    the only door-adjacent event in the scenario).
+    """
+    front_door = GraphConnector("front_door", "entryway", OUTSIDE)
+    yard_link = GraphConnector("c1", "front_yard", "entryway")
+    engine = OccupancyEngine(_graph(("entryway", "front_yard"), (front_door, yard_link)))
+    engine.process_signal(AreaActivitySignal("front_yard", T0, source="s1"))
+    engine.process_signal(
+        ConnectorActivitySignal(
+            "front_door", T0 + timedelta(seconds=2), source="binary_sensor.front_door"
+        )
+    )
+    corroborated = T0 + timedelta(seconds=4)
+    engine.process_signal(AreaActivitySignal("entryway", corroborated, source="s2"))
+
+    assert engine.area_state("entryway", corroborated).occupant_count == 1
+    assert engine.area_state("front_yard", corroborated).occupant_count == 0
+    assert engine.egress_anchor_total is None
+
+
+def test_override_occupant_count_does_not_touch_the_egress_anchor() -> None:
+    """Deliberate: the anchor only ever moves on a confirmed door crossing —
+    see `override_occupant_count`'s own docstring for why a manual
+    correction doesn't adjust it either way.
+    """
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway", "kitchen"), (connector,)))
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    engine.process_signal(AreaActivitySignal("entryway", T0 + timedelta(seconds=5), source="s1"))
+    assert engine.egress_anchor_total == 1
+
+    engine.override_occupant_count("kitchen", 1, T0 + timedelta(minutes=1))
+
+    assert engine.egress_anchor_total == 1  # unchanged
+    assert engine.total_occupant_count(T0 + timedelta(minutes=1)) == 2  # now unexplained by doors
+
+
+def test_override_occupant_count_does_not_establish_an_unset_egress_anchor() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    assert engine.egress_anchor_total is None
+
+    engine.override_occupant_count("kitchen", 1, T0)
+
+    assert engine.egress_anchor_total is None
+
+
+def test_expire_vacant_area_does_not_touch_the_egress_anchor() -> None:
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    graph = HouseGraph(
+        area_ids=frozenset({"entryway", "landing"}),
+        connectors=(connector,),
+        decay_eligible_area_ids=frozenset({"landing"}),
+    )
+    engine = OccupancyEngine(graph)
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    engine.process_signal(AreaActivitySignal("entryway", T0 + timedelta(seconds=5), source="s1"))
+    assert engine.egress_anchor_total == 1
+
+    engine.process_signal(AreaActivitySignal("landing", T0 + timedelta(hours=1), source="s2"))
+    assert engine.total_occupant_count(T0 + timedelta(hours=1)) == 2  # ungrounded, unexplained
+
+    cleared_at = T0 + timedelta(hours=1, minutes=5)
+    engine.expire_vacant_area("landing", cleared_at)
+
+    assert engine.egress_anchor_total == 1  # unchanged throughout
+    assert engine.total_occupant_count(cleared_at) == 1  # back in sync with the anchor

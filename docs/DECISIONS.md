@@ -14,6 +14,49 @@ Format:
 
 ---
 
+## 2026-08-16 — Whole-house conservation: an egress-anchored total, flagged not capped
+**Decision:** New `OccupancyEngine.egress_anchor_total` property (backed by `self._egress_anchor:
+int | None`): a whole-house total reconstructed *purely* from confirmed door crossings, starting at
+`None` ("unanchored" — no real evidence yet) until the first one happens. `_note_egress_delta()` is
+called (before the corresponding count mutation, so the two move in lockstep) from exactly two
+places: `_handle_egress_activity`'s confirmed-departure branch (-1), and `_confirm_transit`'s
+confirmed-arrival branch when the source genuinely stays `OUTSIDE` (+1) — *not* when it gets
+reattributed to an already-counted interior neighbor (docs/DECISIONS.md's 2026-08-15 "egress-arrival
+confirmation" entry), since that isn't a new person. The anchor deliberately does **not** move for a
+manual `override_occupant_count` correction or a `expire_vacant_area` decay-clear, even though both
+are trusted evidence — see "Alternatives considered" below for why that turned out to be the wrong
+instinct on first pass. `sensor.py`'s `TotalOccupantCountSensor` gained two new attributes,
+`door_confirmed_occupant_count` (the anchor, when established) and `unexplained_by_doors` (`True`
+when the interior-inferred total exceeds it) — purely informational, exactly the same "confidence
+signal, never a cap" shape `exceeds_household_size_hint` already has. 10 new engine unit tests plus
+one end-to-end entity test (226 total), `ruff`/`mypy`/`pytest` all clean.
+
+**Why:** This is recommendation #1 from a background research pass into how this class of problem
+(multi-room occupant counting from sparse binary sensors on a known topology) has been solved
+elsewhere — see that session's conversation for the full report. The report's framing was a genuine
+*hard* constraint ("occupants can only be created/destroyed at a door or via a phone"), but a literal
+reading of that directly reverses `SPEC.md` §6.4's deliberate "never reject or cap a count the
+evidence actually supports" — a hard version would either invent a fake anchor or silently refuse to
+count a real, evidenced occupant (e.g. an existing occupant present at first install, before any
+door has ever fired). Project-owner decision, made explicitly before implementation: flag, never
+reject — and treat the pre-first-door-event state as "unanchored, no flag," not "assume 0 people,"
+so a fresh install with people already home doesn't immediately read as suspicious. Phone/zone-based
+anchoring (the report's other suggested anchor source) is out of scope for this slice — this is
+egress-crossings only; extending it to `zone_fusion.py`'s tracked-person state is a natural,
+separate follow-up, not attempted here.
+
+**Alternatives considered:** The first implementation draft *did* adjust the anchor on
+`override_occupant_count`/`expire_vacant_area`, on the theory that trusted corrections shouldn't
+leave a just-confirmed total looking "unexplained." Writing the test for `expire_vacant_area`
+caught a real bug in that version before it shipped: clearing a phantom occupant that was *never*
+anchored in the first place (its birth never touched the anchor) would incorrectly *decrement* the
+anchor too, breaking a total that was already correctly in sync. More fundamentally, on reflection,
+"unexplained by doors" is simply, permanently true for an occupant who came in through an untracked
+entrance — silently folding a correction into the anchor's baseline would hide that fact rather than
+report it honestly. Reverted to the simpler rule (anchor only ever moves on a confirmed door
+crossing) before implementation was considered done — a case of the test-first discipline in
+`docs/TESTING.md` catching a real design flaw, not just a coding bug.
+
 ## 2026-08-16 — Topology-panel UI for area-kind override and outdoor-area flag; outdoor Areas get a dotted halo ring, not a stroke reuse
 **Decision:** Built the topology-panel UI for the two backend-only fields the same day's earlier
 "Decay for continuous-presence sensors..." and "Area-kind classification..." entries below left

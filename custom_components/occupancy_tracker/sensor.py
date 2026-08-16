@@ -112,8 +112,8 @@ class TotalOccupantCountSensor(_EngineBoundSensor):
         return self._engine.total_occupant_count(dt_util.utcnow())
 
     @property
-    def extra_state_attributes(self) -> dict[str, str | bool]:
-        attributes: dict[str, str | bool] = {
+    def extra_state_attributes(self) -> dict[str, str | bool | int]:
+        attributes: dict[str, str | bool | int] = {
             "zone_corroboration": self._zone_fusion.house_zone_corroboration().name.lower()
         }
         hint = self._engine.household_size_hint
@@ -123,6 +123,16 @@ class TotalOccupantCountSensor(_EngineBoundSensor):
             # statistically less likely for a household this size.
             attributes["exceeds_household_size_hint"] = (
                 self._engine.total_occupant_count(dt_util.utcnow()) > hint
+            )
+        anchor = self._engine.egress_anchor_total
+        if anchor is not None:
+            # Whole-house conservation check (docs/DECISIONS.md) — also
+            # confidence-only, same "never caps or rejects" guarantee as the
+            # household-size hint above, just anchored to real door
+            # crossings/corrections instead of a static guess.
+            attributes["door_confirmed_occupant_count"] = anchor
+            attributes["unexplained_by_doors"] = (
+                self._engine.total_occupant_count(dt_util.utcnow()) > anchor
             )
         return attributes
 

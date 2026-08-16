@@ -1113,17 +1113,36 @@ suite: 216 passed (was 216 — one assertion added to an existing test, no new t
 project owner's live-browser verification before considering either control done, same as the
 "Eleventh" plain-language pass above.
 
+**Fourteenth** (2026-08-16): the project owner reviewed the research report's four recommendations,
+decided to pursue the direction "starting small," and picked recommendation #1 (whole-house
+conservation) to build first — see `docs/DECISIONS.md`'s new "Whole-house conservation: an
+egress-anchored total, flagged not capped" entry for the full design. Summary: a new
+`OccupancyEngine.egress_anchor_total` tracks the whole-house total as reconstructed purely from
+confirmed door crossings (`None` — unanchored — until the first one, so a fresh install with people
+already home isn't immediately flagged); `sensor.total_occupant_count` gained
+`door_confirmed_occupant_count`/`unexplained_by_doors` attributes, informational only, same "never
+caps" shape as the existing household-size hint. A real design flaw was caught by the test-first
+process before shipping: an early draft also adjusted the anchor on manual overrides/decay-clears,
+which a test for `expire_vacant_area` proved wrong (it would silently launder an unrelated,
+still-real phantom's presence into the trusted baseline) — reverted to the simpler, correct rule
+(anchor only moves on an actual door crossing) before calling this done. 10 new engine tests + 1
+end-to-end entity test (226 total), `ruff`/`mypy`/`pytest` all clean. Recommendations #2–#4 (scored
+timing instead of a hard cutoff, tracking multiple weighted "who's where" hypotheses instead of one,
+and learning per-edge/per-sensor parameters from the house's own history) remain undecided — the
+project owner has not yet chosen whether/when to take those on; they're a genuinely larger rewrite of
+the engine's core state per the research report, not a comparable-sized slice to this one.
+
 Remaining, not blocking either half of this session's work:
 
-1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth" above)** — the timing/area-kind-
-   scaling half, the decay half, and the topology-panel UI for both `area_kind_overrides` and
-   `outside_area_ids` are all now built and tested; only live-browser verification remains (see
-   "Thirteenth"). Still open, a genuinely separate/larger question raised by this session's research
-   pass (see "Twelfth" above): whether to eventually move the core transit-inference algorithm from
-   single-hypothesis/hard-threshold to a small weighted-hypothesis Bayesian filter — a real design
-   decision for the project owner, not started.
-2. **Outdoor-Area-vs-total-occupancy decision** (see "Ninth" above) — needs the project owner's choice
-   between the two options presented.
+1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth"/"Fourteenth" above)** — the
+   timing/area-kind-scaling half, the decay half, the topology-panel UI for both new topology fields,
+   and whole-house conservation (research recommendation #1) are all now built and tested; only
+   live-browser verification remains for the UI pieces (see "Thirteenth"). Still open: recommendations
+   #2–#4 from the research pass (score-based timing, multi-hypothesis tracking, learned parameters) —
+   a real, larger design decision for the project owner, not started.
+2. **Outdoor-Area-vs-total-occupancy decision** — resolved (see "Twelfth" above): a real
+   `outside_area_ids` flag was built, excluding a flagged Area from `Total Occupant Count` while
+   keeping it fully tracked otherwise.
 3. **`hacs`'s `check-manifest` stays red** — known, non-blocking (see above); revisit only with new
    evidence or when actually pursuing HACS default-repository submission.
 4. **The real-sensor smoke test continues** — expect more real-hardware wrinkles like the Konnected
