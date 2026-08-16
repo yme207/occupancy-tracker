@@ -14,6 +14,38 @@ Format:
 
 ---
 
+## 2026-08-16 — Uncertain births extended to egress-arrival reattribution
+**Decision:** Closes the deliberate scope limit noted in the original "uncertain births" entry.
+`_confirm_transit`'s egress-arrival reattribution (an ambiguous door confirmation that could be a
+genuinely new person from OUTSIDE, or actually the same already-counted person in a Connector-
+adjacent interior Area — e.g. someone in `front_yard`) now calls `_search_plausible_transit_sources`
+directly instead of the single-winner `_plausible_transit_source` wrapper, so a genuine near-tie
+among 2+ interior candidates records an uncertain birth the same way the interior-fallback path
+already does — instead of just discarding the tie and permanently treating it as a fresh arrival.
+
+The one real wrinkle this path has that the interior one doesn't: `egress_anchor_total` already
+provisionally counted the door crossing as a real arrival (`_note_egress_delta(1)` — a confirmed
+door crossing genuinely happened, so the anchor treats it as real *unless and until* something says
+otherwise). `_UncertainBirthRecord` gained `is_egress_arrival: bool`, and
+`_resolve_stale_uncertain_births` now undoes that provisional anchor increment (`-1`) whenever an
+egress-flagged birth resolves by reattributing to an interior candidate — it's the same real person
+relocating between two interior Areas near the door, not a fresh arrival, so the anchor needs to
+reflect that once it's understood, not just the count. A non-egress birth is unaffected (the `if
+record.is_egress_arrival` guard), and a genuinely unambiguous egress arrival (a single clear
+candidate, or truly zero candidates) behaves exactly as before — this only changes the specific
+near-tie case that previously fell through to "permanently attributed to OUTSIDE" with no way to
+self-correct. 3 new tests (260 total), `ruff`/`mypy`/`pytest` all clean.
+
+**Why:** The project owner asked to close out both scope limits noted after the original "uncertain
+births" entry. This one was a well-defined, bounded extension of already-built, already-tested
+machinery — no new product decisions needed, since every relevant trade-off (time-erosion only for
+inferred guesses, no persistence, small cap) was already settled for the interior-fallback case and
+applies identically here.
+**Alternatives considered:** Leaving the egress anchor's provisional `+1` in place even after
+resolution (simpler) — rejected as inconsistent with what "the anchor represents purely confirmed
+door crossings" is supposed to mean; leaving it would let a resolved, understood-to-be-not-a-real-
+arrival permanently inflate the anchor, undermining recommendation #1's whole point.
+
 ## 2026-08-16 — Learned transit timing: per-Area-pair, fully replaces the flat default, persisted
 **Decision:** Recommendation #4, the last of the four research recommendations, and the one that
 depended on #2/#3's machinery existing first (per the research report itself). `OccupancyEngine`

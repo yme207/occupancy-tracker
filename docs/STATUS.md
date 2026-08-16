@@ -1184,14 +1184,25 @@ clean. This closes out all four research recommendations from the background res
 this session — #1 (whole-house conservation), #2 (scored timing), #3 (uncertain-birth
 self-correction), #4 (learned timing) are all built, tested, and documented.
 
-Remaining, not blocking either half of this session's work:
+**Eighteenth** (2026-08-16): closed the first of the two scope limits noted above — see
+`docs/DECISIONS.md`'s new "Uncertain births extended to egress-arrival reattribution" entry.
+`_confirm_transit`'s egress-arrival reattribution now records an uncertain birth on a genuine
+near-tie among interior candidates too (previously only `_handle_area_activity`'s interior-fallback
+path did), including correctly undoing the egress anchor's provisional `+1` if it later resolves to
+an interior candidate instead of a real arrival. 3 new tests (260 total), `ruff`/`mypy`/`pytest` all
+clean. This was a well-bounded extension of already-decided, already-built machinery — no new product
+decisions needed.
 
-1. **Transit-timing rework (see "Ninth" through "Seventeenth" above)** — the timing/area-kind-scaling
-   half, the decay half, the topology-panel UI for both new topology fields, and all four research
-   recommendations (#1-#4) are now built and tested; only live-browser verification remains for the UI
-   pieces (see "Thirteenth"). Still open, deliberately not attempted: extending uncertain-birth tracking
-   to the egress-arrival path, and per-sensor reliability/miss-rate learning (a separate statistical
-   problem from the per-edge timing just built) — both documented scope limits, not started.
+**Per-sensor reliability/miss-rate learning (the second scope limit) was deliberately not attempted**
+— unlike every other recommendation in this whole line of work, it doesn't have an obvious "ground
+truth" signal to learn from. Transit timing had a clean one (whole-house count confidently at 1); a
+sensor's own *miss rate* would need some independent way to know "someone was actually here and this
+specific sensor failed to detect them," which nothing in the current design establishes — the closest
+candidate (a manual `override_occupant_count` correction contradicting what the sensor-based
+inference believed) is sparse and doesn't cleanly attribute blame to one specific sensor when an Area
+has several selected. This needs its own design conversation (what counts as ground truth, what a
+learned reliability score would actually change once known) before any implementation is attempted,
+not a guess — flagged rather than built.
 2. **Outdoor-Area-vs-total-occupancy decision** — resolved (see "Twelfth" above): a real
    `outside_area_ids` flag was built, excluding a flagged Area from `Total Occupant Count` while
    keeping it fully tracked otherwise.

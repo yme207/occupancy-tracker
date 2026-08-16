@@ -330,6 +330,16 @@ class _UncertainBirthRecord:
     #: reattribute to (see `_resolve_stale_uncertain_births`).
     candidate_last_confirmed_at_fork: dict[str, datetime | None]
     created_at: datetime
+    #: True when this birth came from an egress-point arrival that stayed
+    #: attributed to OUTSIDE only because of a near-tie among interior
+    #: candidates (docs/DECISIONS.md's "uncertain births" entry's egress
+    #: extension), not from `_handle_area_activity`'s ordinary interior
+    #: fallback. `_note_egress_delta(1)` already ran when this was created
+    #: (the door crossing itself is real) — if this later resolves to an
+    #: interior candidate instead, that provisional "new arrival" turns out
+    #: to have been the same already-counted person, so the egress anchor
+    #: needs undoing too, not just the count.
+    is_egress_arrival: bool = False
 
 
 @dataclass(slots=True)
@@ -675,7 +685,12 @@ class OccupancyEngine:
         ]
 
     def _record_uncertain_birth(
-        self, area_id: str, candidates: Mapping[str, float], now: datetime
+        self,
+        area_id: str,
+        candidates: Mapping[str, float],
+        now: datetime,
+        *,
+        is_egress_arrival: bool = False,
     ) -> None:
         """Remember a genuine near-tie behind a new occupant (docs/DECISIONS.md's
         "uncertain births" entry), so it can potentially self-correct later.
@@ -694,6 +709,7 @@ class OccupancyEngine:
                     for candidate_id in candidates
                 },
                 created_at=now,
+                is_egress_arrival=is_egress_arrival,
             )
         )
 
@@ -746,6 +762,14 @@ class OccupancyEngine:
         can't safely reinterpret — the birth is dropped *without*
         reattributing, leaving it a permanent, separate occupant rather than
         risking a wrong silent merge.
+
+        For a birth that came from an egress-point arrival (`is_egress_arrival`
+        — docs/DECISIONS.md's egress extension to this entry), a successful
+        reattribution also undoes the provisional egress-anchor increment
+        `_confirm_transit` made when the door crossing was first confirmed:
+        it's now understood this wasn't actually a fresh arrival from
+        OUTSIDE after all, just the same already-counted person moving
+        between two interior Areas near the door.
         """
         still_pending: list[_UncertainBirthRecord] = []
         for record in self._uncertain_births:
@@ -770,6 +794,8 @@ class OccupancyEngine:
                 # double-subtract one real person.
                 best_candidate = max(untouched, key=lambda a: untouched[a])
                 self._counts[best_candidate] -= 1
+                if record.is_egress_arrival and self._egress_anchor is not None:
+                    self._egress_anchor = max(0, self._egress_anchor - 1)
         self._uncertain_births = still_pending
 
     def _handle_area_activity(self, signal: AreaActivitySignal) -> None:
@@ -1040,10 +1066,20 @@ class OccupancyEngine:
             # already relies on everywhere else, rather than inventing a
             # second one — if more than one neighbor is plausible, it stays
             # ambiguous and falls back to OUTSIDE, same as that path's own
-            # "can't resolve a direction" behavior.
-            alt_source = self._plausible_transit_source(pending.dest_area_id, now)
+            # "can't resolve a direction" behavior. A genuine near-tie (not
+            # just "no candidates at all") is worth remembering as an
+            # uncertain birth too, same as the interior-fallback path
+            # (docs/DECISIONS.md's egress extension to that entry) — it may
+            # yet turn out this wasn't really a fresh arrival from OUTSIDE.
+            alt_source, alt_candidates = self._search_plausible_transit_sources(
+                pending.dest_area_id, now
+            )
             if alt_source is not None:
                 source = alt_source
+            elif len(alt_candidates) >= 2:
+                self._record_uncertain_birth(
+                    pending.dest_area_id, alt_candidates, now, is_egress_arrival=True
+                )
 
         if source != OUTSIDE and self._counts[source] <= 0:
             # The source was already drained by a different confirmed

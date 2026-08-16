@@ -1298,3 +1298,87 @@ def test_learned_transit_times_can_be_seeded_at_construction() -> None:
 
     assert engine.area_state("kitchen", far_past_learned).occupant_count == 1  # untouched
     assert engine.area_state("hallway", far_past_learned).occupant_count == 1  # new, unrelated
+
+
+# -- Uncertain births extended to egress-arrival reattribution
+# (docs/DECISIONS.md's egress extension to the "uncertain births" entry) ----
+
+
+def test_egress_arrival_near_tie_creates_an_egress_flagged_uncertain_birth() -> None:
+    """Two Connector-adjacent interior Areas equally plausible as the "real"
+    source of a confirmed door arrival — same shape as
+    test_two_plausible_neighbors_at_once_stays_ambiguous_not_guessed, but
+    this now also remembers the tie as an uncertain birth instead of just
+    discarding it, and the door crossing still provisionally counts toward
+    the egress anchor since it was a real, confirmed crossing.
+    """
+    front_door = GraphConnector("front_door", "entryway", OUTSIDE)
+    yard1_link = GraphConnector("c1", "yard1", "entryway")
+    yard2_link = GraphConnector("c2", "yard2", "entryway")
+    engine = OccupancyEngine(
+        _graph(("entryway", "yard1", "yard2"), (front_door, yard1_link, yard2_link))
+    )
+    engine.process_signal(AreaActivitySignal("yard1", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("yard2", T0, source="s2"))
+
+    arrived = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", arrived, source="binary_sensor.front_door")
+    )
+    corroborated = arrived + timedelta(seconds=2)
+    engine.process_signal(AreaActivitySignal("entryway", corroborated, source="s3"))
+
+    assert engine.area_state("entryway", corroborated).occupant_count == 1
+    assert engine.area_state("yard1", corroborated).occupant_count == 1  # untouched — ambiguous
+    assert engine.area_state("yard2", corroborated).occupant_count == 1  # untouched — ambiguous
+    assert engine.egress_anchor_total == 3  # provisionally: a real, confirmed door crossing
+
+    births = engine.uncertain_births(corroborated)
+    assert len(births) == 1
+    assert births[0].area_id == "entryway"
+    assert births[0].candidate_area_ids == frozenset({"yard1", "yard2"})
+
+
+def test_egress_arrival_uncertain_birth_resolves_and_undoes_the_anchor() -> None:
+    front_door = GraphConnector("front_door", "entryway", OUTSIDE)
+    yard1_link = GraphConnector("c1", "yard1", "entryway")
+    yard2_link = GraphConnector("c2", "yard2", "entryway")
+    config = EngineConfig(uncertain_birth_resolution_delay=timedelta(minutes=30))
+    engine = OccupancyEngine(
+        _graph(("entryway", "yard1", "yard2"), (front_door, yard1_link, yard2_link)), config
+    )
+    engine.process_signal(AreaActivitySignal("yard1", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("yard2", T0, source="s2"))
+    arrived = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", arrived, source="binary_sensor.front_door")
+    )
+    corroborated = arrived + timedelta(seconds=2)
+    engine.process_signal(AreaActivitySignal("entryway", corroborated, source="s3"))
+    assert engine.egress_anchor_total == 3
+    assert engine.total_occupant_count(corroborated) == 3
+
+    after_delay = corroborated + timedelta(minutes=31)
+    total = engine.total_occupant_count(after_delay)
+
+    # Resolved: one of yard1/yard2 was the true source all along, not a
+    # fresh arrival — both the count and the anchor's provisional +1 undo.
+    assert total == 2
+    assert engine.egress_anchor_total == 2
+    assert engine.area_state("entryway", after_delay).occupant_count == 1
+    assert engine.uncertain_births(after_delay) == ()
+    yard1_count = engine.area_state("yard1", after_delay).occupant_count
+    yard2_count = engine.area_state("yard2", after_delay).occupant_count
+    assert {yard1_count, yard2_count} == {0, 1}
+
+
+def test_egress_arrival_without_any_candidates_creates_no_uncertain_birth() -> None:
+    front_door = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway",), (front_door,)))
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    now = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("entryway", now, source="s1"))
+
+    assert engine.uncertain_births(now) == ()
