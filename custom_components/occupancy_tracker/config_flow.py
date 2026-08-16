@@ -33,6 +33,7 @@ from .const import (
     CONF_TRACKED_PERSONS,
     CONF_TRANSIT_AREA_HOP_EXTENSION,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
+    CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY,
     DOMAIN,
 )
 
@@ -113,6 +114,10 @@ class OccupancyTrackerOptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_LONG_LATCHED_REVIEW_THRESHOLD,
                     default=options.get(CONF_LONG_LATCHED_REVIEW_THRESHOLD, {"hours": 12}),
+                ): selector.DurationSelector(),
+                vol.Optional(
+                    CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY,
+                    default=options.get(CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY, {"minutes": 30}),
                 ): selector.DurationSelector(),
                 vol.Optional(
                     CONF_CONFIRMED_FRESHNESS_WINDOW,

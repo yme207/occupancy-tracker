@@ -1149,22 +1149,39 @@ feature) before the scoring behavior they meant to isolate — fixed by matching
 already-passing multi-neighbor test uses (same-instant signals, refreshed later without re-triggering
 a source search) rather than assuming distinct timestamps would behave independently.
 
-**Not built this round**: recommendations #3 (tracking several weighted "who's where" possibilities
-instead of one) and #4 (learning per-edge/per-sensor timing parameters from the house's own history) —
-both still need a dedicated design conversation before implementation, since #3 changes what the
-engine stores and what `AreaState`/the entity platforms/`SPEC.md` §6.2/§6.8 describe, not just how a
-decision gets computed, and #4 depends on #3's scoring machinery existing first per the research
-report itself.
+**Sixteenth** (2026-08-16): the project owner had the design conversation for recommendation #3 —
+four decisions (inferred-only time erosion, no restart persistence, day-to-day UI unchanged, small
+guess budget) — see `docs/DECISIONS.md`'s new "Uncertain births: a scoped, bounded implementation of
+research recommendation #3" entry for the full design and how those four decisions map onto a
+deliberately narrower mechanism than a full particle-filter rewrite: **uncertain-birth tracking**.
+Instead of every Area carrying several complete alternate pictures, the engine now specifically
+remembers the exact "new occupant from a near-tie" moments it already detects, and lets *that one
+uncorroborated guess* self-correct — reattributing back to the original candidate if nothing
+independently confirms a genuine second person within `uncertain_birth_resolution_delay` (30 min
+default, user-facing). A new realistic scenario test reproduces the *exact* original overnight-bug
+shape end-to-end (two people upstairs, one ambiguous later arrival) and confirms it now resolves back
+to the true ground truth instead of staying wrong forever. `SPEC.md` §6.2 updated with an honest,
+narrow exception explaining this. 14 new tests (241 total), `ruff`/`mypy`/`pytest` all clean. A real
+bug was caught by the very first resolution test failing: an early draft double-decremented both the
+new occupant's own Area and the candidate on resolution — fixed to only drain the candidate, matching
+how an ordinary transit already works.
+
+**Not built this round**: recommendation #4 (learning per-edge/per-sensor timing parameters from the
+house's own history) — per the research report itself, this depends on #3's scoring/candidate
+machinery existing first, which it now does; a natural next slice, not started. Also not extended in
+this pass: uncertain-birth tracking only covers `_handle_area_activity`'s interior-fallback path, not
+`_confirm_transit`'s egress-arrival reattribution — a deliberate scope limit, see DECISIONS.md's
+"Alternatives considered."
 
 Remaining, not blocking either half of this session's work:
 
-1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth"/"Fourteenth"/"Fifteenth"
-   above)** — the timing/area-kind-scaling half, the decay half, the topology-panel UI for both new
-   topology fields, whole-house conservation (research recommendation #1), and scored transit timing
-   (recommendation #2) are all now built and tested; only live-browser verification remains for the UI
-   pieces (see "Thirteenth"). Still open: recommendations #3–#4 from the research pass (multi-hypothesis
-   tracking, learned parameters) — a real, larger design decision for the project owner, needs its own
-   dedicated design pass before implementation, not started.
+1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth"/"Fourteenth"/"Fifteenth"/
+   "Sixteenth" above)** — the timing/area-kind-scaling half, the decay half, the topology-panel UI for
+   both new topology fields, whole-house conservation (#1), scored transit timing (#2), and uncertain-
+   birth self-correction (#3) are all now built and tested; only live-browser verification remains for
+   the UI pieces (see "Thirteenth"). Still open: recommendation #4 (learned per-edge/per-sensor timing
+   parameters) — a smaller remaining piece now that #3 exists, not started; and extending uncertain-birth
+   tracking to the egress-arrival path, a documented, deliberate scope limit from this round.
 2. **Outdoor-Area-vs-total-occupancy decision** — resolved (see "Twelfth" above): a real
    `outside_area_ids` flag was built, excluding a flagged Area from `Total Occupant Count` while
    keeping it fully tracked otherwise.

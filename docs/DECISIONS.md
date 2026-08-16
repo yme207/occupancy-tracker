@@ -14,6 +14,74 @@ Format:
 
 ---
 
+## 2026-08-16 — Uncertain births: a scoped, bounded implementation of research recommendation #3
+**Decision:** Recommendation #3 ("track several weighted possibilities instead of one") is
+implemented here as **uncertain-birth tracking**, deliberately narrower than a full generalized
+particle-filter rewrite: rather than every Area holding a weighted set of complete alternate
+per-house pictures, the engine now specifically remembers the exact moments it already identifies
+as genuinely ambiguous — a "new occupant" created because 2+ Connector-adjacent Areas scored a
+near-tie (`_search_plausible_transit_sources`, extended from `_plausible_transit_source` to also
+return the full candidate set, not just the single winner) — and lets *that specific, uncorroborated
+guess* self-correct if nothing ever independently confirms it.
+
+New `_UncertainBirthRecord` (internal) / `UncertainBirth` (public, read-only) tracks: the new
+occupant's Area, the tied candidates and their scores, and a snapshot of each candidate's
+`last_confirmed` at fork time. `_resolve_stale_uncertain_births(now)` — called lazily everywhere
+`_expire_pending` already is (`area_state`, `total_occupant_count`, `process_signal`; matches the
+existing "freshness label only updates on the next signal or property read" precedent, since the
+engine has no timer of its own) — settles any record older than
+`EngineConfig.uncertain_birth_resolution_delay` (default 30 minutes, user-facing): if exactly the
+original candidates that are *still* occupied *and* untouched since the fork (same `last_confirmed`)
+exist, the highest-scoring one is drained, exactly like an ordinary transit's source (the new
+occupant's own Area already got its `+1` at fork time, so resolution only ever decrements the
+candidate — an early draft double-decremented both, caught by the very first resolution test
+failing). If every original candidate has since left or gained fresh evidence of its own, the record
+is dropped *without* reattributing — a genuinely more complex situation this heuristic can't safely
+reinterpret, so it leaves the birth a permanent, separate occupant rather than risk a wrong silent
+merge. `override_occupant_count`/`expire_vacant_area` both now discard any uncertain birth
+referencing the Area they touch (as the birth itself or as a candidate), same "a trusted correction
+supersedes an unresolved automatic guess" reasoning the pending-transit cleanup already has. Bounded
+at `EngineConfig.max_uncertain_births` (default 8, not user-facing) per `docs/ARCHITECTURE.md`'s
+memory-bound requirement — oldest dropped first. Exposed via the websocket explainability API
+(`uncertain_births`, alongside the existing `pending_transits`). `SPEC.md` §6.2 updated with an
+honest, narrow exception (see that section) — this is the one place a purely *inferred*,
+never-corroborated guess is allowed to lose confidence from elapsed time alone; `SPEC.md`'s "never
+decay direct evidence" guarantee is otherwise completely unchanged. 12 new engine tests + 1 realistic
+scenario test reproducing the exact original overnight-overcounting bug end-to-end + 1 websocket
+test (241 total), `ruff`/`mypy`/`pytest` all clean.
+
+**Why:** Direct project-owner decisions from a design conversation held before implementation
+(matching how every other rework this session happened): (1) an unconfirmed, inferred guess should
+be allowed to gently lose confidence purely from elapsed time — but never anything directly
+evidenced — since that's the one mechanism that self-corrects a phantom even on a quiet night with
+no other house activity to compare it against (the exact scenario that produced the original bug);
+(2) the belief state does *not* need to survive an HA restart — simplest version, no new `Store`
+schema/migration; (3) the day-to-day room tile/chip stays exactly as it is today, with the new
+concept surfaced only via the explainability API and a diagnostic websocket field, not a new
+always-visible confidence number; (4) a small, fixed cap rather than the research report's own
+32-256 hypothesis range, since real ambiguity in a house-sized graph rarely branches wide.
+
+Scoping this as "remember and resolve specific uncertain ties" rather than "track N complete
+alternate pictures of the whole house" was a deliberate choice made *within* implementing those four
+decisions, not a fifth one asked separately — a full generalized rewrite would touch nearly every
+method in the engine (every mutation path would need to become hypothesis-parametric), reshape what
+`AreaState` and the entity platforms expose even in the non-ambiguous common case, and take
+meaningfully longer to get right and test thoroughly. This narrower version delivers exactly the
+outcome all four decisions actually called for (self-correcting uncertainty, bounded, no
+persistence, simple UI) while keeping the change contained to the specific decision points that were
+already conservative "don't guess" moments in the existing code — the 229 pre-existing tests needed
+zero changes, only additions, which is itself a signal the scoping was right.
+
+**Alternatives considered:** Extending uncertain-birth tracking to `_confirm_transit`'s
+egress-arrival reattribution path too (an ambiguous door arrival that could be OUTSIDE or a
+neighbor) — deliberately left out of scope for this pass to keep the change bounded to the one path
+(`_handle_area_activity`'s interior fallback) that's both the more common trigger and the one the
+original bug actually came from; a natural follow-up, not attempted here. Auto-resolving purely by
+elapsed time regardless of whether a candidate got fresh evidence since the fork — rejected in favor
+of the "untouched since fork" check, since silently merging two genuinely separate people (one who
+happened to still be near a stale-but-real candidate) would trade the original overcounting risk for
+a new, undercounting one; leaving it unresolved-forever in that specific case is the safer default.
+
 ## 2026-08-16 — Scored transit timing replaces the hard confirmation-window cutoff
 **Decision:** Recommendation #2 from the research pass, built as its own bounded slice deliberately
 kept *underneath* the current single-guess-per-Area model (recommendation #3, tracking several

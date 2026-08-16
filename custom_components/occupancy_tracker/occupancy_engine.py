@@ -186,6 +186,21 @@ class AreaState:
 
 
 @dataclass(frozen=True, slots=True)
+class UncertainBirth:
+    """A currently-pending "was this really a new person" record
+    (docs/DECISIONS.md's "uncertain births" entry) — read-only diagnostic
+    view (SPEC.md §8) of an internal `_UncertainBirth`. Created when a new
+    occupant is inferred from a genuine near-tie among 2+ plausible sources
+    (not when there was no plausible source at all — that stays a plain,
+    unambiguous new occupant, same as before this feature existed).
+    """
+
+    area_id: str
+    candidate_area_ids: frozenset[str]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class EngineConfig:
     """Tunables for the latch/transit model (docs/ARCHITECTURE.md §2's
     "typed, centralized config" extension point). Scoped to what SPEC.md
@@ -235,6 +250,24 @@ class EngineConfig:
     #: always exactly tied regardless of this value, matching the old exact-tie
     #: behavior; this only matters for candidates in the tapering zone.
     transit_score_tie_margin: float = 0.05
+    #: How long an "uncertain birth" (docs/DECISIONS.md's "uncertain births"
+    #: entry) — a new occupant inferred from a genuine near-tie among 2+
+    #: plausible sources — sits unresolved before the engine concludes
+    #: nothing ever independently confirmed it as a real, separate person,
+    #: and reattributes it back to whichever original candidate is still
+    #: untouched since the tie (or leaves it alone permanently if none are).
+    #: This is the one place a purely *inferred*, never-corroborated guess is
+    #: allowed to lose confidence from elapsed time alone — direct evidence
+    #: never does (SPEC.md §6.2 is unchanged for anything actually
+    #: evidenced). Exposed to users (unlike `transit_grace_fraction`/
+    #: `transit_score_tie_margin`) since "how long to wait before settling
+    #: an unresolved tie" is a real, explainable concept.
+    uncertain_birth_resolution_delay: timedelta = timedelta(minutes=30)
+    #: Maximum number of uncertain births tracked at once (docs/ARCHITECTURE.md's
+    #: bounded-memory requirement) — the oldest is dropped (becoming a
+    #: permanent, unresolved new occupant, same as today's behavior) if a new
+    #: one would exceed this. Internal tuning knob, not exposed to users.
+    max_uncertain_births: int = 8
     #: How long a decay-eligible Area's continuous-presence evidence must
     #: stay off, with nothing else explaining continued occupancy, before
     #: `expire_vacant_area` clears it (docs/DECISIONS.md's decay entry).
@@ -266,6 +299,23 @@ class _PendingTransit:
     expires_at: datetime
 
 
+@dataclass(slots=True)
+class _UncertainBirthRecord:
+    """Internal, mutable working state for an `UncertainBirth` — see that
+    class's docstring for what it represents.
+    """
+
+    area_id: str
+    candidate_scores: dict[str, float]
+    #: Snapshot of each candidate's own `last_confirmed` at the moment of
+    #: the fork, so resolution can tell whether a candidate has had any
+    #: evidence of its own since — a candidate that's had fresh, independent
+    #: evidence since the fork is no longer a safe thing to silently
+    #: reattribute to (see `_resolve_stale_uncertain_births`).
+    candidate_last_confirmed_at_fork: dict[str, datetime | None]
+    created_at: datetime
+
+
 class OccupancyEngine:
     """The latch/transit-inference state machine (SPEC.md §6.2-§6.5)."""
 
@@ -284,6 +334,10 @@ class OccupancyEngine:
         #: home must never be flagged as suspicious just because no door has
         #: fired yet.
         self._egress_anchor: int | None = None
+        #: Currently-pending uncertain births (docs/DECISIONS.md's
+        #: "uncertain births" entry) — bounded by
+        #: `EngineConfig.max_uncertain_births`.
+        self._uncertain_births: list[_UncertainBirthRecord] = []
 
     @property
     def graph(self) -> HouseGraph:
@@ -358,6 +412,7 @@ class OccupancyEngine:
         if area_id not in self._counts:
             raise ValueError(f"Unknown area: {area_id!r}")
         self._expire_pending(now)
+        self._resolve_stale_uncertain_births(now)
         quality = self._quality_for(area_id, now)
         return AreaState(
             area_id=area_id,
@@ -393,6 +448,7 @@ class OccupancyEngine:
         (docs/DECISIONS.md).
         """
         self._expire_pending(now)
+        self._resolve_stale_uncertain_births(now)
         return sum(
             count
             for area_id, count in self._counts.items()
@@ -403,6 +459,20 @@ class OccupancyEngine:
         """Connector ids with an unresolved transit, for diagnostics (SPEC.md §8)."""
         self._expire_pending(now)
         return frozenset(self._pending)
+
+    def uncertain_births(self, now: datetime) -> tuple[UncertainBirth, ...]:
+        """Currently-pending uncertain births, for diagnostics (SPEC.md §8) —
+        see `UncertainBirth`'s own docstring for what one represents.
+        """
+        self._resolve_stale_uncertain_births(now)
+        return tuple(
+            UncertainBirth(
+                area_id=record.area_id,
+                candidate_area_ids=frozenset(record.candidate_scores),
+                created_at=record.created_at,
+            )
+            for record in self._uncertain_births
+        )
 
     def override_occupant_count(self, area_id: str, count: int, now: datetime) -> None:
         """Directly set an Area's occupant count (SPEC.md §8's manual override service).
@@ -421,6 +491,11 @@ class OccupancyEngine:
         simply, honestly true for them, forever, regardless of how confident the correction is.
         Keeping the anchor door-crossing-only avoids that kind of silent laundering, at the cost of
         the flag potentially staying on after a correction the user just confirmed is right.
+
+        Also discards any uncertain birth (docs/DECISIONS.md's "uncertain births" entry) referencing
+        this Area, whether as the ambiguous new occupant itself or as one of its candidate sources —
+        same "a manual correction is strictly more authoritative than an unresolved automatic guess"
+        reasoning as the pending-transit cleanup above.
         """
         if area_id not in self._counts:
             raise ValueError(f"Unknown area: {area_id!r}")
@@ -433,6 +508,7 @@ class OccupancyEngine:
             if pending.source_area_id == area_id or pending.dest_area_id == area_id
         ]:
             del self._pending[connector_id]
+        self._discard_uncertain_births_referencing(area_id)
         self._counts[area_id] = count
         self._last_confirmed[area_id] = now
         self._last_provenance[area_id] = ProvenanceTier.USER_CONFIRMED
@@ -458,6 +534,7 @@ class OccupancyEngine:
 
         Deliberately does *not* touch the egress anchor either, same reasoning as
         `override_occupant_count` — the anchor only ever moves on a confirmed door crossing.
+        Also discards any uncertain birth referencing this Area, same as `override_occupant_count`.
         """
         if area_id not in self._graph.decay_eligible_area_ids:
             return
@@ -470,6 +547,7 @@ class OccupancyEngine:
             if pending.source_area_id == area_id or pending.dest_area_id == area_id
         ]:
             del self._pending[connector_id]
+        self._discard_uncertain_births_referencing(area_id)
         self._counts[area_id] = 0
         self._last_confirmed[area_id] = now
         for listener in list(self._listeners):
@@ -478,6 +556,7 @@ class OccupancyEngine:
     def process_signal(self, signal: Signal) -> None:
         """Fold one normalized Signal into the engine's belief state."""
         self._expire_pending(signal.timestamp)
+        self._resolve_stale_uncertain_births(signal.timestamp)
         if isinstance(signal, AreaActivitySignal):
             self._handle_area_activity(signal)
         else:
@@ -512,6 +591,80 @@ class OccupancyEngine:
         for connector_id in expired:
             del self._pending[connector_id]
 
+    def _discard_uncertain_births_referencing(self, area_id: str) -> None:
+        self._uncertain_births = [
+            record
+            for record in self._uncertain_births
+            if record.area_id != area_id and area_id not in record.candidate_scores
+        ]
+
+    def _record_uncertain_birth(
+        self, area_id: str, candidates: Mapping[str, float], now: datetime
+    ) -> None:
+        """Remember a genuine near-tie behind a new occupant (docs/DECISIONS.md's
+        "uncertain births" entry), so it can potentially self-correct later.
+        """
+        if len(self._uncertain_births) >= self._config.max_uncertain_births:
+            # Bounded memory (docs/ARCHITECTURE.md) — drop the oldest rather
+            # than grow without limit; it simply becomes a permanent,
+            # unresolved new occupant instead, same as today's behavior.
+            self._uncertain_births.pop(0)
+        self._uncertain_births.append(
+            _UncertainBirthRecord(
+                area_id=area_id,
+                candidate_scores=dict(candidates),
+                candidate_last_confirmed_at_fork={
+                    candidate_id: self._last_confirmed.get(candidate_id)
+                    for candidate_id in candidates
+                },
+                created_at=now,
+            )
+        )
+
+    def _resolve_stale_uncertain_births(self, now: datetime) -> None:
+        """Settle any uncertain birth that's sat unresolved for at least
+        `EngineConfig.uncertain_birth_resolution_delay` (docs/DECISIONS.md's
+        "uncertain births" entry) — deliberately lazy, evaluated on any call
+        that passes `now`, matching `_expire_pending`'s own established
+        pattern (docs/STATUS.md's Phase 4 "freshness label only updates on
+        the next signal or property read" precedent) rather than a scheduled
+        timer the engine has no way to run on its own (pure Python, no HA).
+
+        Reattributes back to whichever original candidate is still
+        untouched since the fork (still occupied, and its own `last_confirmed`
+        hasn't changed) — the one case this heuristic can safely conclude
+        "this was probably the same person all along, just slow to confirm."
+        If every original candidate has since left or gained fresh evidence
+        of its own, something genuinely happened that this simple check
+        can't safely reinterpret — the birth is dropped *without*
+        reattributing, leaving it a permanent, separate occupant rather than
+        risking a wrong silent merge.
+        """
+        still_pending: list[_UncertainBirthRecord] = []
+        for record in self._uncertain_births:
+            if now - record.created_at < self._config.uncertain_birth_resolution_delay:
+                still_pending.append(record)
+                continue
+            if self._counts.get(record.area_id, 0) <= 0:
+                continue  # already resolved some other way — drop silently
+            untouched = {
+                candidate_id: score
+                for candidate_id, score in record.candidate_scores.items()
+                if self._counts.get(candidate_id, 0) > 0
+                and self._last_confirmed.get(candidate_id)
+                == record.candidate_last_confirmed_at_fork.get(candidate_id)
+            }
+            if untouched:
+                # The ambiguous new occupant's Area already got its +1 at
+                # fork time — resolving the tie only drains the candidate,
+                # exactly like a normal transit's source (`_confirm_transit`
+                # does the same thing: -1 source, dest is already +1'd).
+                # Decrementing the birth's own Area *too* here would
+                # double-subtract one real person.
+                best_candidate = max(untouched, key=lambda a: untouched[a])
+                self._counts[best_candidate] -= 1
+        self._uncertain_births = still_pending
+
     def _handle_area_activity(self, signal: AreaActivitySignal) -> None:
         area_id = signal.area_id
         if area_id not in self._counts:
@@ -532,7 +685,7 @@ class OccupancyEngine:
             # evidence of a transit at all, and it has to double as both
             # "candidate evidence" and "corroboration" in the same event
             # (see docs/DECISIONS.md).
-            source = self._plausible_transit_source(area_id, signal.timestamp)
+            source, candidates = self._search_plausible_transit_sources(area_id, signal.timestamp)
             if source is not None:
                 self._counts[source] -= 1
                 self._counts[area_id] = 1
@@ -544,11 +697,27 @@ class OccupancyEngine:
             # No Connector-adjacent Area plausibly explains this as the same
             # person arriving — new-occupant evidence (SPEC.md §6.4).
             self._counts[area_id] = 1
+            if len(candidates) >= 2:
+                # A genuine near-tie among 2+ real candidates, not "no
+                # candidate scored above zero at all" — worth remembering as
+                # an uncertain birth in case it self-corrects later
+                # (docs/DECISIONS.md's "uncertain births" entry).
+                self._record_uncertain_birth(area_id, candidates, signal.timestamp)
 
         self._last_confirmed[area_id] = signal.timestamp
         self._last_provenance[area_id] = signal.provenance
 
     def _plausible_transit_source(self, area_id: str, now: datetime) -> str | None:
+        """The single resolved candidate from `_search_plausible_transit_sources`,
+        for callers (`_confirm_transit`'s egress-arrival reattribution) that
+        don't need the full candidate set an uncertain-birth record would.
+        """
+        source, _ = self._search_plausible_transit_sources(area_id, now)
+        return source
+
+    def _search_plausible_transit_sources(
+        self, area_id: str, now: datetime
+    ) -> tuple[str | None, Mapping[str, float]]:
         """The one reachable occupied Area whose last evidence is close
         enough in time to `now` to plausibly be the same person arriving on
         foot — not so close it would require teleporting (they can't — a gap
@@ -594,6 +763,13 @@ class OccupancyEngine:
         `transit_score_tie_margin` of the next-best — the same "can't
         resolve a direction, don't guess" rule as before, generalized from
         exact ties to near-ties now that scores are continuous.
+
+        Returns `(winner, candidates)`: `winner` is `None` whenever no
+        candidate scored above zero *or* the top two were too close to call;
+        `candidates` is every Area actually in contention at the decisive
+        (nearest) layer — empty if none were ever found, so callers can tell
+        "no real ambiguity" apart from "a genuine near-tie" (docs/DECISIONS.md's
+        "uncertain births" entry needs exactly that distinction).
         """
         visited = {area_id}
         frontier: dict[str, timedelta] = {area_id: timedelta(0)}
@@ -628,13 +804,13 @@ class OccupancyEngine:
                         candidates[other] = score
             if candidates:
                 if len(candidates) == 1:
-                    return next(iter(candidates))
+                    return next(iter(candidates)), candidates
                 ranked = sorted(candidates.values(), reverse=True)
                 if ranked[0] - ranked[1] <= self._config.transit_score_tie_margin:
-                    return None  # too close to call
-                return max(candidates, key=lambda a: candidates[a])
+                    return None, candidates  # too close to call
+                return max(candidates, key=lambda a: candidates[a]), candidates
             frontier = next_frontier
-        return None
+        return None, {}
 
     def _transit_plausibility_score(self, gap: timedelta, effective_window: timedelta) -> float:
         """How plausible `gap` is for the same person to have walked the distance

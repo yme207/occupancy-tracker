@@ -266,6 +266,42 @@ def test_two_plausible_neighbors_at_once_stays_ambiguous_not_guessed() -> None:
     assert sum(result.values()) == 3
 
 
+def test_ambiguous_new_occupant_eventually_self_corrects_if_never_independently_confirmed() -> None:
+    """docs/DECISIONS.md's "uncertain births" entry — the actual
+    self-correction mechanism for the exact overnight-overcounting bug this
+    whole line of work started from. `bedroom` and `office` are both
+    equally plausible sources for a later, ambiguous `landing` arrival —
+    ground truth is really just one person moving between rooms, but the
+    engine correctly can't tell which room they came from at the moment it
+    happens, so (as in the sibling ambiguous-arrival test above) it counts
+    them as a new occupant rather than guessing. Unlike that older behavior,
+    this no longer stays wrong forever: with nothing ever independently
+    confirming a genuine second person, it resolves back to the true ground
+    truth after the configured delay.
+    """
+    graph = real_house_graph()
+    config = EngineConfig(uncertain_birth_resolution_delay=timedelta(minutes=30))
+    moves = [
+        Move(offset=0, area_id=BEDROOM),
+        Move(offset=0, area_id=OFFICE),
+        Move(offset=5, area_id=LANDING),
+    ]
+    engine = run_scenario(graph, moves, config=config)
+    fork_time = T0 + timedelta(seconds=5)
+
+    fork_result = counts(engine, fork_time)
+    assert sum(fork_result.values()) == 3  # bedroom, office, and the ambiguous landing arrival
+
+    after_delay = fork_time + timedelta(minutes=31)
+    result = counts(engine, after_delay)
+
+    assert result[LANDING] == 1
+    assert sum(result.values()) == 2  # resolved back to the true ground truth
+    # One of bedroom/office was drained (whichever the tie-break picked) —
+    # deliberately not asserting *which*, a genuine symmetric tie.
+    assert {result[BEDROOM], result[OFFICE]} == {0, 1}
+
+
 def test_delivery_arrival_does_not_disturb_two_unrelated_occupants_upstairs() -> None:
     """Two people are already settled upstairs (bedroom, office) when a third
     person arrives via the front door — a direct test of the "known number of

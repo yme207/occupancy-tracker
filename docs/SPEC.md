@@ -156,7 +156,20 @@ spans; a staircase connector carries no different weighting than a same-floor do
 
 Unchanged from v1: each Area holds a non-negative integer occupant count that only changes on a
 discrete transit event (or a confirmed egress event). Absence of signal never decays it — a room
-only empties when there's positive evidence of an exit.
+only empties when there's positive evidence of an exit. This holds unconditionally for any Area's
+*directly evidenced* count.
+
+**One narrow, deliberate exception, added 2026-08-16** ("uncertain births" — see `docs/DECISIONS.md`
+for the full reasoning): when a new occupant is inferred because two or more Connector-adjacent
+Areas were *equally* plausible sources (§6.3's transit inference can't tell which, so it doesn't
+guess — the new occupant is recorded as usual), that specific inference — not the Area's count in
+general, only this one uncorroborated guess — is allowed to lose confidence purely from elapsed
+time, and self-correct back to whichever original candidate is still untouched since the tie, if
+nothing ever independently confirms it really was a separate person. This is what lets a missed or
+slow transit heal itself instead of permanently double-counting; it never applies to a count with
+real, direct evidence behind it, and it never happens sooner than a configurable delay
+(`uncertain_birth_resolution_delay`, §7.2) intended to give real corroborating evidence a fair
+chance to arrive first.
 
 ### 6.3 Transit Inference
 

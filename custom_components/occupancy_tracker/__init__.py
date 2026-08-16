@@ -35,6 +35,7 @@ from .const import (
     CONF_TRACKED_PERSONS,
     CONF_TRANSIT_AREA_HOP_EXTENSION,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
+    CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY,
     DOMAIN,
 )
 from .engine_adapter import build_house_graph
@@ -244,6 +245,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
             entry.options,
             CONF_LONG_LATCHED_REVIEW_THRESHOLD,
             default_engine_config.long_latched_review_threshold,
+        ),
+        uncertain_birth_resolution_delay=_duration_option(
+            entry.options,
+            CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY,
+            default_engine_config.uncertain_birth_resolution_delay,
         ),
         household_size_hint=_household_size_hint_option(entry.options),
     )

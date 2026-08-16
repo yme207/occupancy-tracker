@@ -925,3 +925,211 @@ def test_expire_vacant_area_does_not_touch_the_egress_anchor() -> None:
 
     assert engine.egress_anchor_total == 1  # unchanged throughout
     assert engine.total_occupant_count(cleared_at) == 1  # back in sync with the anchor
+
+
+# -- Uncertain births (docs/DECISIONS.md's "uncertain births" entry) ---------
+
+
+def test_unambiguous_new_occupant_creates_no_uncertain_birth() -> None:
+    """No plausible source at all -- a plain, unambiguous new occupant,
+    exactly as before this feature existed. Nothing to fork.
+    """
+    engine = OccupancyEngine(_graph(("kitchen",)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    assert engine.uncertain_births(T0) == ()
+
+
+def test_clean_transit_creates_no_uncertain_birth() -> None:
+    """A single, unambiguous candidate resolves as a normal transit -- no
+    tie, so nothing to fork either.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    now = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s2"))
+
+    assert engine.uncertain_births(now) == ()
+
+
+def test_ambiguous_new_occupant_creates_an_uncertain_birth() -> None:
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway))
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    now = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s3"))
+
+    births = engine.uncertain_births(now)
+    assert len(births) == 1
+    assert births[0].area_id == "hallway"
+    assert births[0].candidate_area_ids == frozenset({"kitchen", "study"})
+    assert births[0].created_at == now
+
+
+def test_uncertain_birth_resolves_to_the_untouched_candidate_after_the_delay() -> None:
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    config = EngineConfig(uncertain_birth_resolution_delay=timedelta(minutes=30))
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway)), config
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    fork_time = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", fork_time, source="s3"))
+    assert engine.total_occupant_count(fork_time) == 3
+
+    after_delay = fork_time + timedelta(minutes=31)
+
+    assert engine.total_occupant_count(after_delay) == 2  # resolved back to one continuous transit
+    assert engine.area_state("hallway", after_delay).occupant_count == 1
+    assert engine.uncertain_births(after_delay) == ()
+    # One of kitchen/study was drained (whichever the tie-break picked) —
+    # deliberately not asserting *which*, since either is an equally correct
+    # resolution of a genuine, symmetric tie.
+    kitchen_count = engine.area_state("kitchen", after_delay).occupant_count
+    study_count = engine.area_state("study", after_delay).occupant_count
+    assert {kitchen_count, study_count} == {0, 1}
+
+
+def test_uncertain_birth_not_resolved_before_the_delay_elapses() -> None:
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    config = EngineConfig(uncertain_birth_resolution_delay=timedelta(minutes=30))
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway)), config
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    fork_time = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", fork_time, source="s3"))
+
+    just_before = fork_time + timedelta(minutes=29, seconds=59)
+
+    assert engine.total_occupant_count(just_before) == 3  # still unresolved
+    assert len(engine.uncertain_births(just_before)) == 1
+
+
+def test_uncertain_birth_does_not_reattribute_if_a_candidate_was_touched_since_the_fork() -> None:
+    """Both original candidates get fresh, independent evidence of their own
+    after the fork — real, ongoing activity, not a stale guess — so neither
+    is safe to silently reattribute to. The birth is dropped from tracking
+    without changing any count, leaving both as genuinely separate occupants.
+    """
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    config = EngineConfig(uncertain_birth_resolution_delay=timedelta(minutes=30))
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway)), config
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    fork_time = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", fork_time, source="s3"))
+
+    refreshed = fork_time + timedelta(seconds=10)
+    engine.process_signal(AreaActivitySignal("kitchen", refreshed, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", refreshed, source="s2"))
+
+    after_delay = fork_time + timedelta(minutes=31)
+
+    assert engine.total_occupant_count(after_delay) == 3  # left alone, not silently merged
+    assert engine.uncertain_births(after_delay) == ()  # dropped from tracking, not resolved
+
+
+def test_uncertain_birth_dropped_silently_if_its_own_area_already_emptied() -> None:
+    """If the ambiguous new occupant's own Area is cleared some other way
+    before resolution (e.g. a manual correction, or they left again) before
+    the delay elapses, there's nothing left to resolve — dropped, no
+    reattribution attempted.
+    """
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    config = EngineConfig(uncertain_birth_resolution_delay=timedelta(minutes=30))
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway)), config
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    fork_time = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", fork_time, source="s3"))
+
+    engine.override_occupant_count("hallway", 0, fork_time + timedelta(seconds=10))
+    # The override itself should have already discarded the birth record —
+    # confirmed separately below — but this also proves the lazy resolver
+    # doesn't error or misbehave if it somehow still saw a zeroed Area.
+    after_delay = fork_time + timedelta(minutes=31)
+
+    assert engine.uncertain_births(after_delay) == ()
+    assert engine.area_state("kitchen", after_delay).occupant_count == 1  # untouched
+    assert engine.area_state("study", after_delay).occupant_count == 1  # untouched
+
+
+def test_uncertain_births_are_capped() -> None:
+    """Bounded memory (docs/ARCHITECTURE.md) — the oldest is dropped rather
+    than letting the list grow without limit.
+    """
+    config = EngineConfig(max_uncertain_births=2)
+    area_ids: list[str] = []
+    connectors: list[GraphConnector] = []
+    for i in range(3):
+        kitchen, study, hallway = f"kitchen{i}", f"study{i}", f"hallway{i}"
+        area_ids += [kitchen, study, hallway]
+        connectors += [
+            GraphConnector(f"ck{i}", kitchen, hallway),
+            GraphConnector(f"cs{i}", study, hallway),
+        ]
+    engine = OccupancyEngine(
+        HouseGraph(area_ids=frozenset(area_ids), connectors=tuple(connectors)), config
+    )
+
+    now = T0 + timedelta(seconds=5)
+    for i in range(3):
+        kitchen, study, hallway = f"kitchen{i}", f"study{i}", f"hallway{i}"
+        engine.process_signal(AreaActivitySignal(kitchen, T0, source="s1"))
+        engine.process_signal(AreaActivitySignal(study, T0, source="s2"))
+        engine.process_signal(AreaActivitySignal(hallway, now, source="s3"))
+
+    assert len(engine.uncertain_births(now)) == 2
+
+
+def test_override_occupant_count_discards_a_referencing_uncertain_birth() -> None:
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway))
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    now = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s3"))
+    assert len(engine.uncertain_births(now)) == 1
+
+    engine.override_occupant_count("hallway", 1, now)  # user confirms it manually
+
+    assert engine.uncertain_births(now) == ()
+
+
+def test_override_occupant_count_discards_a_birth_referencing_it_as_a_candidate() -> None:
+    """A manual correction to one of the *candidate* Areas (not the ambiguous
+    new occupant itself) also supersedes the automatic guess about it.
+    """
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway))
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    now = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s3"))
+    assert len(engine.uncertain_births(now)) == 1
+
+    engine.override_occupant_count("kitchen", 0, now)  # e.g. user confirms kitchen is empty
+
+    assert engine.uncertain_births(now) == ()

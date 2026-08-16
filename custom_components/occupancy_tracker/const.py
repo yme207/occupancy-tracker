@@ -32,3 +32,7 @@ CONF_DECAY_GRACE_PERIOD = "decay_grace_period"
 #: Options-flow key: `EngineConfig.long_latched_review_threshold` (docs/DECISIONS.md's
 #: decay entry), same duration-dict storage as above.
 CONF_LONG_LATCHED_REVIEW_THRESHOLD = "long_latched_review_threshold"
+#: Options-flow key: `EngineConfig.uncertain_birth_resolution_delay`
+#: (docs/DECISIONS.md's "uncertain births" entry), same duration-dict
+#: storage as above.
+CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY = "uncertain_birth_resolution_delay"

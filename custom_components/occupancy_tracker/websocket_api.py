@@ -202,6 +202,19 @@ def _engine_state_json(engine: OccupancyEngine) -> dict[str, Any]:
             }
             for connector in pending_connectors
         ],
+        # Uncertain births (docs/DECISIONS.md's "uncertain births" entry):
+        # a "new occupant" inferred from a genuine near-tie among 2+
+        # plausible sources, still unresolved. Diagnostic only — the panel
+        # can show "this might actually be the same person as one of these
+        # other rooms" without the engine itself guessing.
+        "uncertain_births": [
+            {
+                "area_id": birth.area_id,
+                "candidate_area_ids": list(birth.candidate_area_ids),
+                "created_at": birth.created_at.isoformat(),
+            }
+            for birth in engine.uncertain_births(now)
+        ],
     }
 
 

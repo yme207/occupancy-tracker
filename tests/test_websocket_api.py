@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
@@ -9,7 +11,10 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.occupancy_tracker.engine_adapter import egress_connector_id
-from custom_components.occupancy_tracker.occupancy_engine import ConnectorActivitySignal
+from custom_components.occupancy_tracker.occupancy_engine import (
+    AreaActivitySignal,
+    ConnectorActivitySignal,
+)
 from custom_components.occupancy_tracker.topology_store import Connector, EgressPoint, TopologyData
 
 
@@ -502,6 +507,46 @@ async def test_get_engine_state_reports_pending_transit(
         {"connector_id": connector_id, "area_id_a": entryway.id, "area_id_b": "outside"}
     ]
     assert response["result"]["areas"][entryway.id]["quality"] == "AMBIGUOUS"
+
+
+async def test_get_engine_state_reports_uncertain_birth(
+    hass: HomeAssistant,
+    hass_ws_client,
+    area_registry: ar.AreaRegistry,
+    enable_custom_integrations: None,
+) -> None:
+    kitchen = area_registry.async_get_or_create("Kitchen")
+    study = area_registry.async_get_or_create("Study")
+    hallway = area_registry.async_get_or_create("Hallway")
+
+    entry = await _setup_entry(hass)
+    topology = TopologyData(
+        connectors=(
+            Connector("c1", kitchen.id, hallway.id),
+            Connector("c2", study.id, hallway.id),
+        )
+    )
+    await entry.runtime_data.topology_store.async_save(topology)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    engine = entry.runtime_data.engine
+    now = dt_util.utcnow()
+    engine.process_signal(AreaActivitySignal(kitchen.id, now, source="s1"))
+    engine.process_signal(AreaActivitySignal(study.id, now, source="s2"))
+    engine.process_signal(AreaActivitySignal(hallway.id, now + timedelta(seconds=5), source="s3"))
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {"type": "occupancy_tracker/engine/get_state", "entry_id": entry.entry_id}
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is True
+    births = response["result"]["uncertain_births"]
+    assert len(births) == 1
+    assert births[0]["area_id"] == hallway.id
+    assert set(births[0]["candidate_area_ids"]) == {kitchen.id, study.id}
 
 
 async def test_get_engine_state_unknown_entry_id_errors(
