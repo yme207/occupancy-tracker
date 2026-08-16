@@ -181,18 +181,97 @@ def test_direct_transit_inferred_at_exactly_the_minimum_plausible_gap() -> None:
 
 
 def test_direct_transit_not_inferred_when_source_evidence_is_stale() -> None:
-    """A gap longer than the transit window reads as unrelated, not a transfer."""
+    """A gap well beyond even the scored-timing grace zone (docs/DECISIONS.md's
+    "scored transit timing" entry) reads as unrelated, not a transfer — the
+    graceful tapering near the window's edge is still a *bounded* grace
+    period, not an unlimited one.
+    """
     connector = GraphConnector("c1", "kitchen", "hallway")
     config = EngineConfig(transit_confirmation_window=timedelta(seconds=90))
     engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
     engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
 
-    long_after = T0 + timedelta(seconds=91)
+    # Default transit_grace_fraction=0.5 means plausibility hits zero at
+    # 90s * 1.5 = 135s — well past that.
+    long_after = T0 + timedelta(seconds=200)
     engine.process_signal(AreaActivitySignal("hallway", long_after, source="s2"))
 
     assert engine.area_state("kitchen", long_after).occupant_count == 1
     assert engine.area_state("hallway", long_after).occupant_count == 1
     assert engine.total_occupant_count(long_after) == 2
+
+
+def test_direct_transit_still_inferred_just_past_the_window_at_reduced_plausibility() -> None:
+    """The graceful-tapering half of "scored transit timing"
+    (docs/DECISIONS.md): a walk that finishes *just* past the window — the
+    exact shape of the real overnight walk-test bug — now still resolves as
+    a continued transit instead of falling off a cliff into "must be a new
+    person" the instant the window elapses.
+    """
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=90))
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)), config)
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    just_past = T0 + timedelta(seconds=91)  # 1s past a 90s window
+    engine.process_signal(AreaActivitySignal("hallway", just_past, source="s2"))
+
+    assert engine.area_state("kitchen", just_past).occupant_count == 0
+    assert engine.area_state("hallway", just_past).occupant_count == 1
+    assert engine.total_occupant_count(just_past) == 1
+
+
+def test_transit_score_tie_within_the_grace_zone_stays_ambiguous() -> None:
+    """Two candidates whose scores land close together in the tapering zone
+    (docs/DECISIONS.md's "scored transit timing" entry) are still an
+    unresolvable tie, generalizing the old exact-tie rule to near-ties now
+    that scores are continuous.
+    """
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=90))
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway)), config
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+
+    # Both gaps are identical (100s) once the window has elapsed — an exact
+    # tie in the tapering zone, not just at full-strength score=1.0 (already
+    # covered by test_direct_transit_not_inferred_with_multiple_occupied_neighbors).
+    now = T0 + timedelta(seconds=100)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s3"))
+
+    assert engine.area_state("kitchen", now).occupant_count == 1  # untouched — ambiguous
+    assert engine.area_state("study", now).occupant_count == 1  # untouched — ambiguous
+    assert engine.area_state("hallway", now).occupant_count == 1  # new occupant, not guessed
+    assert engine.total_occupant_count(now) == 3
+
+
+def test_transit_score_picks_the_clearly_more_plausible_candidate() -> None:
+    """When one candidate is comfortably more plausible than the other (not
+    just barely), scoring resolves it instead of staying ambiguous.
+    """
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    config = EngineConfig(transit_confirmation_window=timedelta(seconds=90))
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway)), config
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    # study is refreshed later — already occupied by this point, so this just
+    # updates its own last-confirmed timestamp without re-triggering a
+    # source search (which would otherwise itself resolve against kitchen).
+    engine.process_signal(AreaActivitySignal("study", T0 + timedelta(seconds=40), source="s2"))
+
+    now = T0 + timedelta(seconds=100)  # kitchen gap=100s (tapering); study gap=60s (in-window)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s3"))
+
+    assert engine.area_state("kitchen", now).occupant_count == 1  # untouched
+    assert engine.area_state("study", now).occupant_count == 0  # drained — the real source
+    assert engine.area_state("hallway", now).occupant_count == 1
+    assert engine.total_occupant_count(now) == 2
 
 
 def test_confirmed_multi_room_transit() -> None:

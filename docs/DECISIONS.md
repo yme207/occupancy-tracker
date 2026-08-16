@@ -14,6 +14,58 @@ Format:
 
 ---
 
+## 2026-08-16 — Scored transit timing replaces the hard confirmation-window cutoff
+**Decision:** Recommendation #2 from the research pass, built as its own bounded slice deliberately
+kept *underneath* the current single-guess-per-Area model (recommendation #3, tracking several
+weighted possibilities at once, is a separate, larger redesign — not started, needs its own design
+pass first per `docs/DECISIONS.md`'s "Whole-house conservation" entry's own "Phone/zone-based
+anchoring... out of scope" precedent for staged research-recommendation work).
+
+`_plausible_transit_source`'s per-candidate check changed from a hard boolean (`gap` inside
+`transit_confirmation_window` + any `transit_area_hop_extension`, or rejected outright) to a
+continuous plausibility score (new `_transit_plausibility_score`): `1.0` for anything within the
+existing window (identical to the old behavior for the common case), tapering *linearly* down to
+`0.0` over an extra `EngineConfig.transit_grace_fraction` (default `0.5`, i.e. 50% more) of that
+window beyond it, instead of falling off a cliff the instant the window elapses. Within a BFS layer,
+the highest-scoring candidate wins — *unless* it's within `EngineConfig.transit_score_tie_margin`
+(default `0.05`) of the next-best, which still resolves as ambiguous (`None`, no guess), generalizing
+the old exact-tie rule to near-ties now that scores are continuous rather than booleans. Both new
+config fields are deliberately **not** exposed via the options flow — unlike the window durations
+themselves, "how gracefully plausibility tapers" isn't something a non-technical user can meaningfully
+reason about, matching the existing precedent of `min_transit_time` also staying a code-only tunable.
+6 new/updated engine tests (229 total), `ruff`/`mypy`/`pytest` all clean.
+
+Two things the project owner explicitly decided to *not* change in this pass, keeping this the
+smaller, lower-risk half of the research recommendation rather than its fuller design: (1) a
+near-tied timing call still refuses to guess, exactly as before — the project owner chose to keep
+this over letting scoring always pick a highest-scorer, since it preserves an existing, deliberately
+conservative guarantee (`test_coincidental_neighbor_retrigger_can_cause_a_transient_overcount` and
+similar scenarios stay exactly as documented); (2) "this is a brand-new occupant" stays a *fallback*
+used only when no real candidate scores above zero at all, rather than becoming a fully competing
+hypothesis with its own baseline likelihood (the research report's fuller framing) — simpler, and a
+smaller behavioral departure from today's model to validate.
+
+**Why:** Direct project-owner decision after reviewing the research report's four recommendations,
+resolving to pursue the direction "starting small," picking #2 as the second slice (after #1, whole-
+house conservation) specifically because it doesn't require reshaping what the engine stores — the
+existing 229-test suite (minus one deliberately-updated boundary test, see below) stays a meaningful
+regression check rather than needing a simultaneous rewrite.
+
+**Alternatives considered:** A Gamma or log-normal plausibility curve (the research report's own
+suggested shape, closer to how a real walking-time distribution actually looks) — rejected for this
+pass in favor of a simple piecewise-linear taper: no new statistical machinery/dependencies, easy to
+reason about and explain, and recommendation #4 (learning real per-edge timing distributions from the
+house's own history) is where a more realistic curve shape would actually pay for itself, once there's
+real data to fit it from — building a more sophisticated curve now, with no data to calibrate it
+against, would just be guessing at different constants instead of the current ones.
+**Test note:** `test_direct_transit_not_inferred_when_source_evidence_is_stale` previously asserted a
+gap exactly 1 second past a 90s window read as unrelated — that's now the *intended*, changed
+behavior (a near-miss should degrade gracefully, not reject outright), so the test was updated to
+probe a gap genuinely beyond the new tapering zone (200s, past the 135s cutoff) instead, and a new
+test (`test_direct_transit_still_inferred_just_past_the_window_at_reduced_plausibility`) directly
+proves the old boundary case now resolves correctly — the exact shape of the original overnight
+walk-test bug this whole line of work started from.
+
 ## 2026-08-16 — Whole-house conservation: an egress-anchored total, flagged not capped
 **Decision:** New `OccupancyEngine.egress_anchor_total` property (backed by `self._egress_anchor:
 int | None`): a whole-house total reconstructed *purely* from confirmed door crossings, starting at

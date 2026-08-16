@@ -1132,14 +1132,39 @@ and learning per-edge/per-sensor parameters from the house's own history) remain
 project owner has not yet chosen whether/when to take those on; they're a genuinely larger rewrite of
 the engine's core state per the research report, not a comparable-sized slice to this one.
 
+**Fifteenth** (2026-08-16): the project owner asked to proceed with research recommendations #2-4.
+Given the scope difference between them (#2 fits underneath the current single-guess-per-Area model;
+#3/#4 need it reshaped into tracking several weighted possibilities at once — a genuinely bigger,
+separate redesign), only #2 (scored transit timing) was built this round — see `docs/DECISIONS.md`'s
+new "Scored transit timing replaces the hard confirmation-window cutoff" entry for the full design
+and the two project-owner decisions that kept it deliberately conservative (near-ties still refuse to
+guess; "new occupant" stays a fallback, not a competing hypothesis with its own likelihood). The old
+hard cutoff on `_plausible_transit_source`'s candidates is now a continuous score, tapering gracefully
+over an extra 50% of the window instead of rejecting outright the instant it elapses — directly fixing
+the "just barely missed the window" shape of the original overnight-overcounting bug, on top of (not
+instead of) the area-kind hop-scaling already built. 6 new/updated engine tests (229 total),
+`ruff`/`mypy`/`pytest` all clean. Two of the new tests initially failed for an instructive reason: they
+accidentally triggered the *existing* multi-hop pass-through search (a different, already-shipped
+feature) before the scoring behavior they meant to isolate — fixed by matching the timing pattern the
+already-passing multi-neighbor test uses (same-instant signals, refreshed later without re-triggering
+a source search) rather than assuming distinct timestamps would behave independently.
+
+**Not built this round**: recommendations #3 (tracking several weighted "who's where" possibilities
+instead of one) and #4 (learning per-edge/per-sensor timing parameters from the house's own history) —
+both still need a dedicated design conversation before implementation, since #3 changes what the
+engine stores and what `AreaState`/the entity platforms/`SPEC.md` §6.2/§6.8 describe, not just how a
+decision gets computed, and #4 depends on #3's scoring machinery existing first per the research
+report itself.
+
 Remaining, not blocking either half of this session's work:
 
-1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth"/"Fourteenth" above)** — the
-   timing/area-kind-scaling half, the decay half, the topology-panel UI for both new topology fields,
-   and whole-house conservation (research recommendation #1) are all now built and tested; only
-   live-browser verification remains for the UI pieces (see "Thirteenth"). Still open: recommendations
-   #2–#4 from the research pass (score-based timing, multi-hypothesis tracking, learned parameters) —
-   a real, larger design decision for the project owner, not started.
+1. **Transit-timing rework (see "Ninth"/"Tenth"/"Twelfth"/"Thirteenth"/"Fourteenth"/"Fifteenth"
+   above)** — the timing/area-kind-scaling half, the decay half, the topology-panel UI for both new
+   topology fields, whole-house conservation (research recommendation #1), and scored transit timing
+   (recommendation #2) are all now built and tested; only live-browser verification remains for the UI
+   pieces (see "Thirteenth"). Still open: recommendations #3–#4 from the research pass (multi-hypothesis
+   tracking, learned parameters) — a real, larger design decision for the project owner, needs its own
+   dedicated design pass before implementation, not started.
 2. **Outdoor-Area-vs-total-occupancy decision** — resolved (see "Twelfth" above): a real
    `outside_area_ids` flag was built, excluding a flagged Area from `Total Occupant Count` while
    keeping it fully tracked otherwise.

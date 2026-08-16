@@ -215,6 +215,26 @@ class EngineConfig:
     #: than a same-room signal gap, and a single flat window doesn't scale
     #: with that. Zero would reproduce the old flat-window behavior exactly.
     transit_area_hop_extension: timedelta = timedelta(seconds=60)
+    #: How much *extra*, tapering-plausibility budget (docs/DECISIONS.md's
+    #: "scored transit timing" entry) `_plausible_transit_source` allows past
+    #: `transit_confirmation_window` (+ `transit_area_hop_extension`), as a
+    #: fraction of that window — e.g. the default 0.5 means a candidate up to
+    #: 50% past the window is still considered, at linearly-tapering
+    #: plausibility (1.0 at the window's edge, 0.0 at window*(1+this)),
+    #: instead of being rejected outright the instant the window elapses. A
+    #: gap within the window itself is unaffected (still scores 1.0, same as
+    #: the old hard-cutoff behavior). Internal tuning knob, not exposed to
+    #: users — unlike the window durations themselves, "how gracefully this
+    #: tapers" isn't a concept a non-technical user can meaningfully reason
+    #: about; `0.0` reproduces the old hard-cutoff behavior exactly.
+    transit_grace_fraction: float = 0.5
+    #: How close two candidates' plausibility scores need to be (docs/DECISIONS.md's
+    #: "scored transit timing" entry) to still be treated as an unresolvable tie
+    #: (SPEC.md's existing "don't guess" rule) rather than picking the higher-scoring
+    #: one. Two candidates both scoring 1.0 (both comfortably within the window) are
+    #: always exactly tied regardless of this value, matching the old exact-tie
+    #: behavior; this only matters for candidates in the tapering zone.
+    transit_score_tie_margin: float = 0.05
     #: How long a decay-eligible Area's continuous-presence evidence must
     #: stay off, with nothing else explaining continued occupancy, before
     #: `expire_vacant_area` clears it (docs/DECISIONS.md's decay entry).
@@ -564,11 +584,21 @@ class OccupancyEngine:
         `transit_area_hop_extension` once per `AreaKind.TRANSIT` Area crossed
         along the (shortest) path to a candidate, not just a fixed amount
         regardless of what's actually being walked through.
+
+        Within a layer, candidates are *scored* (docs/DECISIONS.md's "scored
+        transit timing" entry), not just accepted/rejected — a gap just past
+        the window is still plausible, only gradually less so
+        (`_transit_plausibility_score`), rather than falling off a cliff into
+        "must be a stranger" the instant the window elapses. The
+        highest-scoring candidate wins, *unless* it's within
+        `transit_score_tie_margin` of the next-best — the same "can't
+        resolve a direction, don't guess" rule as before, generalized from
+        exact ties to near-ties now that scores are continuous.
         """
         visited = {area_id}
         frontier: dict[str, timedelta] = {area_id: timedelta(0)}
         while frontier:
-            candidates: set[str] = set()
+            candidates: dict[str, float] = {}
             next_frontier: dict[str, timedelta] = {}
             for current, extension in frontier.items():
                 for connector in self._graph.connectors:
@@ -590,13 +620,39 @@ class OccupancyEngine:
                     if last_confirmed is None:
                         continue
                     gap = now - last_confirmed
+                    if gap < self._config.min_transit_time:
+                        continue  # can't teleport — a second, distinct occupant instead
                     effective_window = self._config.transit_confirmation_window + extension
-                    if self._config.min_transit_time <= gap <= effective_window:
-                        candidates.add(other)
+                    score = self._transit_plausibility_score(gap, effective_window)
+                    if score > 0:
+                        candidates[other] = score
             if candidates:
-                return next(iter(candidates)) if len(candidates) == 1 else None
+                if len(candidates) == 1:
+                    return next(iter(candidates))
+                ranked = sorted(candidates.values(), reverse=True)
+                if ranked[0] - ranked[1] <= self._config.transit_score_tie_margin:
+                    return None  # too close to call
+                return max(candidates, key=lambda a: candidates[a])
             frontier = next_frontier
         return None
+
+    def _transit_plausibility_score(self, gap: timedelta, effective_window: timedelta) -> float:
+        """How plausible `gap` is for the same person to have walked the distance
+        `effective_window` already accounts for (docs/DECISIONS.md's "scored transit
+        timing" entry): `1.0` for anything within the window itself (identical to the old
+        hard-cutoff behavior's "definitely still plausible" case), tapering linearly down
+        to `0.0` over an extra `transit_grace_fraction` of that window beyond it, rather
+        than rejecting outright the instant the window elapses.
+        """
+        if gap <= effective_window:
+            return 1.0
+        grace = effective_window * self._config.transit_grace_fraction
+        if grace <= timedelta(0):
+            return 0.0
+        overrun = gap - effective_window
+        if overrun >= grace:
+            return 0.0
+        return 1.0 - (overrun / grace)
 
     def _handle_connector_activity(self, signal: ConnectorActivitySignal) -> None:
         connector = self._graph.connector(signal.connector_id)
