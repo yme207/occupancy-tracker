@@ -7,12 +7,14 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.occupancy_tracker.const import (
+    CONF_CLEAR_HOUSE_WHEN_ALL_AWAY,
     CONF_CONFIRMED_FRESHNESS_WINDOW,
     CONF_HOUSEHOLD_SIZE_HINT,
     CONF_NEAR_HOUSE_ZONES,
     CONF_PRE_ARM_WINDOW,
     CONF_TRACKED_PERSONS,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
+    CONF_ZONE_AWAY_CLEAR_DELAY,
 )
 
 
@@ -82,6 +84,8 @@ async def test_options_flow_saves_tunables(
             CONF_TRANSIT_CONFIRMATION_WINDOW: {"minutes": 2},
             CONF_CONFIRMED_FRESHNESS_WINDOW: {"minutes": 15},
             CONF_PRE_ARM_WINDOW: {"minutes": 7},
+            CONF_CLEAR_HOUSE_WHEN_ALL_AWAY: True,
+            CONF_ZONE_AWAY_CLEAR_DELAY: {"minutes": 20},
         },
     )
     await hass.async_block_till_done()
@@ -96,6 +100,25 @@ async def test_options_flow_saves_tunables(
     assert entry.options[CONF_TRANSIT_CONFIRMATION_WINDOW] == {"minutes": 2}
     assert entry.options[CONF_CONFIRMED_FRESHNESS_WINDOW] == {"minutes": 15}
     assert entry.options[CONF_PRE_ARM_WINDOW] == {"minutes": 7}
+    assert entry.options[CONF_CLEAR_HOUSE_WHEN_ALL_AWAY] is True
+    assert entry.options[CONF_ZONE_AWAY_CLEAR_DELAY] == {"minutes": 20}
+
+
+async def test_options_flow_clear_house_when_all_away_defaults_to_false(
+    hass: HomeAssistant, enable_custom_integrations: None
+) -> None:
+    """Opt-in, off by default (docs/DECISIONS.md's "zone-fusion away-clear"
+    entry) — the schema's own default must reflect that, not just the
+    `ZoneFusionConfig` dataclass default.
+    """
+    entry = MockConfigEntry(domain="occupancy_tracker")
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    schema = result["data_schema"].schema
+    key = next(key for key in schema if key == CONF_CLEAR_HOUSE_WHEN_ALL_AWAY)
+    assert key.default() is False
 
 
 async def test_options_flow_household_size_hint_is_optional(

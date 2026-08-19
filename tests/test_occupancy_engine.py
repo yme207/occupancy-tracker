@@ -1509,3 +1509,100 @@ def test_learned_sensor_reliability_can_be_seeded_at_construction() -> None:
 
     assert engine.learned_sensor_reliability() == {"landing": 5}
     assert engine.effective_decay_grace_period("landing") == timedelta(minutes=15)
+
+
+# -- clear_house (docs/DECISIONS.md's "zone-fusion away-clear" entry) --------
+
+
+def test_clear_house_zeroes_every_occupied_area() -> None:
+    engine = OccupancyEngine(_graph(("kitchen", "hallway", "study")))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+
+    later = T0 + timedelta(minutes=15)
+    engine.clear_house(later)
+
+    assert engine.total_occupant_count(later) == 0
+    kitchen = engine.area_state("kitchen", later)
+    assert kitchen.occupant_count == 0
+    assert kitchen.last_confirmed == later
+
+
+def test_clear_house_is_a_noop_when_already_empty() -> None:
+    engine = OccupancyEngine(_graph(("kitchen",)))
+
+    calls = 0
+
+    def on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    engine.add_listener(on_change)
+    engine.clear_house(T0)
+
+    assert calls == 0
+    assert engine.area_state("kitchen", T0).last_confirmed is None
+
+
+def test_clear_house_notifies_listeners_once() -> None:
+    engine = OccupancyEngine(_graph(("kitchen", "hallway")))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+
+    calls = 0
+
+    def on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    engine.add_listener(on_change)
+    engine.clear_house(T0 + timedelta(minutes=15))
+
+    assert calls == 1
+
+
+def test_clear_house_drops_a_pending_transit() -> None:
+    connector = GraphConnector("c1", "kitchen", "hallway")
+    engine = OccupancyEngine(_graph(("kitchen", "hallway"), (connector,)))
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(ConnectorActivitySignal("c1", T0, source="binary_sensor.door"))
+    assert "c1" in engine.pending_transit_connector_ids(T0)
+
+    engine.clear_house(T0 + timedelta(minutes=15))
+
+    assert "c1" not in engine.pending_transit_connector_ids(T0 + timedelta(minutes=15))
+
+
+def test_clear_house_discards_uncertain_births() -> None:
+    kitchen_hallway = GraphConnector("c1", "kitchen", "hallway")
+    study_hallway = GraphConnector("c2", "study", "hallway")
+    engine = OccupancyEngine(
+        _graph(("kitchen", "study", "hallway"), (kitchen_hallway, study_hallway))
+    )
+    engine.process_signal(AreaActivitySignal("kitchen", T0, source="s1"))
+    engine.process_signal(AreaActivitySignal("study", T0, source="s2"))
+    now = T0 + timedelta(seconds=5)
+    engine.process_signal(AreaActivitySignal("hallway", now, source="s3"))
+    assert engine.uncertain_births(now) != ()
+
+    engine.clear_house(now + timedelta(minutes=15))
+
+    assert engine.uncertain_births(now + timedelta(minutes=15)) == ()
+
+
+def test_clear_house_does_not_touch_the_egress_anchor() -> None:
+    connector = GraphConnector("front_door", "entryway", OUTSIDE)
+    engine = OccupancyEngine(_graph(("entryway",), (connector,)))
+    engine.process_signal(
+        ConnectorActivitySignal("front_door", T0, source="binary_sensor.front_door")
+    )
+    corroborated = T0 + timedelta(seconds=5)
+    engine.process_signal(
+        AreaActivitySignal("entryway", corroborated, source="binary_sensor.entryway_motion")
+    )
+    assert engine.egress_anchor_total == 1
+
+    later = corroborated + timedelta(minutes=15)
+    engine.clear_house(later)
+
+    assert engine.egress_anchor_total == 1
+    assert engine.total_occupant_count(later) == 0

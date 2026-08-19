@@ -698,6 +698,39 @@ class OccupancyEngine:
         for listener in list(self._listeners):
             listener()
 
+    def clear_house(self, now: datetime) -> None:
+        """Force every Area's occupant count to 0 (docs/DECISIONS.md's
+        "zone-fusion away-clear" entry) — the one, narrow, opt-in exception to
+        SPEC.md §6.7's "zone presence alone must never silently change the
+        occupant count" rule. Only ever called by `ZoneFusion`, and only once
+        it has confirmed every tracked person has read AWAY (not just outside
+        a near-house zone) continuously for `ZoneFusionConfig.
+        zone_away_clear_delay` — a single stale/momentary reading is never
+        enough on its own to reach this method.
+
+        A no-op if nothing is currently counted (avoids an unnecessary
+        listener notification when there's nothing to correct). Clears every
+        pending transit and uncertain birth too, since both presuppose an
+        occupant somewhere the house is now confirmed not to have.
+
+        Deliberately does *not* touch the egress anchor or learned statistics
+        (transit timing, sensor reliability) — same reasoning as
+        `override_occupant_count`/`expire_vacant_area`: this corrects a
+        belief, it isn't new evidence about a door crossing or how this
+        house's sensors actually behave.
+        """
+        self._expire_pending(now)
+        to_clear = [area_id for area_id, count in self._counts.items() if count > 0]
+        if not to_clear:
+            return
+        self._pending.clear()
+        self._uncertain_births.clear()
+        for area_id in to_clear:
+            self._counts[area_id] = 0
+            self._last_confirmed[area_id] = now
+        for listener in list(self._listeners):
+            listener()
+
     def process_signal(self, signal: Signal) -> None:
         """Fold one normalized Signal into the engine's belief state."""
         self._expire_pending(signal.timestamp)

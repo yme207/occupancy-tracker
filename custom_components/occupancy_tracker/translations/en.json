@@ -22,7 +22,9 @@
           "pre_arm_window": "How long the house stays \"ready\" after someone gets close",
           "decay_grace_period": "How long a presence sensor must stay clear before its room is marked empty",
           "long_latched_review_threshold": "How long an unconfirmed room goes before it's flagged to double-check",
-          "uncertain_birth_resolution_delay": "How long to wait before settling an unclear \"which room did they come from\" guess"
+          "uncertain_birth_resolution_delay": "How long to wait before settling an unclear \"which room did they come from\" guess",
+          "clear_house_when_all_away": "Automatically clear the whole house to empty once everyone's phone confirms they're away",
+          "zone_away_clear_delay": "How long everyone must show as away before automatically clearing the house"
         },
         "data_description": {
           "tracked_persons": "Pick the phone or person trackers you'd like Occupancy Tracker to pay attention to. On their own, these can never place someone in a specific room — that always comes from your actual door/motion sensors. This just adds extra confidence when someone's phone agrees they're home.",
@@ -34,7 +36,9 @@
           "pre_arm_window": "Once someone enters a nearby zone (see above), the house stays \"ready\" for this long — useful if you have automations, like turning on lights, that you want to trigger a little faster right when someone actually walks in.",
           "decay_grace_period": "Only applies to rooms where every sensor selected is a true presence sensor (one built to keep sensing someone even while they're sitting still) — not an ordinary motion sensor, which naturally goes quiet after a bit even if someone's still there. Once every presence sensor in a room like that has been clear for this long, the room is automatically marked empty.",
           "long_latched_review_threshold": "For every other room (using ordinary motion sensors), Occupancy Tracker never marks a room empty on its own — it only clears when it sees someone leave. If a room has looked occupied for longer than this with nothing new happening, it gets flagged as worth a quick check, in case it's actually empty. Nothing changes automatically; it's just a nudge.",
-          "uncertain_birth_resolution_delay": "Sometimes it's genuinely unclear whether someone new just showed up in a room, or whether it's actually the same person who was already in one of a couple of other rooms nearby — Occupancy Tracker counts it as a new person for now rather than guess. If nothing happens to clear up which room they really came from, it waits this long before quietly deciding it probably was the same person after all, and correcting the count. Turn this down for faster correction; turn it up if you'd rather it wait longer before changing its mind."
+          "uncertain_birth_resolution_delay": "Sometimes it's genuinely unclear whether someone new just showed up in a room, or whether it's actually the same person who was already in one of a couple of other rooms nearby — Occupancy Tracker counts it as a new person for now rather than guess. If nothing happens to clear up which room they really came from, it waits this long before quietly deciding it probably was the same person after all, and correcting the count. Turn this down for faster correction; turn it up if you'd rather it wait longer before changing its mind.",
+          "clear_house_when_all_away": "Sensors alone can never fully undo a wrong \"someone's here\" guess, so the count can drift upward over time if nothing ever proves a room empty. This gives it a safety net: once every person picked above shows as away, it resets the whole house back to empty. Only turn this on if everyone who might realistically be home — including kids, guests, or anyone else who lives here — carries a tracked phone above. If even one person who's sometimes home doesn't, leave this off, or it could wrongly clear the house while they're actually there.",
+          "zone_away_clear_delay": "Only used if the setting above is on. Everyone has to show as away for this long, without a single one coming back, before the house gets reset to empty — this stops a brief phone signal dropout from clearing the house by mistake."
         }
       }
     }

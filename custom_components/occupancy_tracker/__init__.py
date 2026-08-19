@@ -26,6 +26,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .const import (
+    CONF_CLEAR_HOUSE_WHEN_ALL_AWAY,
     CONF_CONFIRMED_FRESHNESS_WINDOW,
     CONF_DECAY_GRACE_PERIOD,
     CONF_HOUSEHOLD_SIZE_HINT,
@@ -36,6 +37,7 @@ from .const import (
     CONF_TRANSIT_AREA_HOP_EXTENSION,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
     CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY,
+    CONF_ZONE_AWAY_CLEAR_DELAY,
     DOMAIN,
 )
 from .engine_adapter import build_house_graph
@@ -294,8 +296,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: OccupancyTrackerConfigEn
         config=ZoneFusionConfig(
             pre_arm_window=_duration_option(
                 entry.options, CONF_PRE_ARM_WINDOW, ZoneFusionConfig().pre_arm_window
-            )
+            ),
+            clear_house_when_all_away=entry.options.get(
+                CONF_CLEAR_HOUSE_WHEN_ALL_AWAY, ZoneFusionConfig().clear_house_when_all_away
+            ),
+            zone_away_clear_delay=_duration_option(
+                entry.options,
+                CONF_ZONE_AWAY_CLEAR_DELAY,
+                ZoneFusionConfig().zone_away_clear_delay,
+            ),
         ),
+        engine=engine,
     )
     zone_fusion.async_start()
     entry.async_on_unload(zone_fusion.async_stop)

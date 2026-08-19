@@ -20,11 +20,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.occupancy_tracker import OccupancyTrackerRuntimeData
 from custom_components.occupancy_tracker.const import (
+    CONF_CLEAR_HOUSE_WHEN_ALL_AWAY,
     CONF_CONFIRMED_FRESHNESS_WINDOW,
     CONF_HOUSEHOLD_SIZE_HINT,
     CONF_PRE_ARM_WINDOW,
     CONF_TRACKED_PERSONS,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
+    CONF_ZONE_AWAY_CLEAR_DELAY,
 )
 from custom_components.occupancy_tracker.learned_timing_store import learned_timing_to_dict
 from custom_components.occupancy_tracker.topology_store import Connector, TopologyData
@@ -348,6 +350,8 @@ async def test_setup_entry_reads_tunables_from_options(
             CONF_TRANSIT_CONFIRMATION_WINDOW: {"minutes": 5},
             CONF_CONFIRMED_FRESHNESS_WINDOW: {"hours": 1},
             CONF_PRE_ARM_WINDOW: {"minutes": 20},
+            CONF_CLEAR_HOUSE_WHEN_ALL_AWAY: True,
+            CONF_ZONE_AWAY_CLEAR_DELAY: {"minutes": 10},
         },
     )
     entry.add_to_hass(hass)
@@ -359,7 +363,14 @@ async def test_setup_entry_reads_tunables_from_options(
     assert engine.household_size_hint == 3
     assert engine._config.transit_confirmation_window == timedelta(minutes=5)
     assert engine._config.confirmed_freshness_window == timedelta(hours=1)
-    assert entry.runtime_data.zone_fusion._config.pre_arm_window == timedelta(minutes=20)
+    zone_fusion = entry.runtime_data.zone_fusion
+    assert zone_fusion._config.pre_arm_window == timedelta(minutes=20)
+    assert zone_fusion._config.clear_house_when_all_away is True
+    assert zone_fusion._config.zone_away_clear_delay == timedelta(minutes=10)
+    # docs/DECISIONS.md's "zone-fusion away-clear" entry: ZoneFusion needs the
+    # same engine instance runtime_data holds, not a throwaway copy of its own
+    # (CLAUDE.md's hard rule #5).
+    assert zone_fusion._engine is engine
 
 
 async def test_setup_entry_defaults_tunables_when_options_unset(
@@ -375,4 +386,7 @@ async def test_setup_entry_defaults_tunables_when_options_unset(
     assert engine.household_size_hint is None
     assert engine._config.transit_confirmation_window == timedelta(seconds=90)
     assert engine._config.confirmed_freshness_window == timedelta(minutes=10)
-    assert entry.runtime_data.zone_fusion._config.pre_arm_window == timedelta(minutes=5)
+    zone_fusion = entry.runtime_data.zone_fusion
+    assert zone_fusion._config.pre_arm_window == timedelta(minutes=5)
+    assert zone_fusion._config.clear_house_when_all_away is False
+    assert zone_fusion._config.zone_away_clear_delay == timedelta(minutes=15)

@@ -24,6 +24,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_CLEAR_HOUSE_WHEN_ALL_AWAY,
     CONF_CONFIRMED_FRESHNESS_WINDOW,
     CONF_DECAY_GRACE_PERIOD,
     CONF_HOUSEHOLD_SIZE_HINT,
@@ -34,6 +35,7 @@ from .const import (
     CONF_TRANSIT_AREA_HOP_EXTENSION,
     CONF_TRANSIT_CONFIRMATION_WINDOW,
     CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY,
+    CONF_ZONE_AWAY_CLEAR_DELAY,
     DOMAIN,
 )
 
@@ -126,6 +128,18 @@ class OccupancyTrackerOptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_PRE_ARM_WINDOW,
                     default=options.get(CONF_PRE_ARM_WINDOW, {"minutes": 5}),
+                ): selector.DurationSelector(),
+                # Opt-in, defaults off (docs/DECISIONS.md's "zone-fusion
+                # away-clear" entry) — only trustworthy when every person who
+                # might be home is one of the trackers picked above; the
+                # translation copy for this field spells that caveat out.
+                vol.Optional(
+                    CONF_CLEAR_HOUSE_WHEN_ALL_AWAY,
+                    default=options.get(CONF_CLEAR_HOUSE_WHEN_ALL_AWAY, False),
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_ZONE_AWAY_CLEAR_DELAY,
+                    default=options.get(CONF_ZONE_AWAY_CLEAR_DELAY, {"minutes": 15}),
                 ): selector.DurationSelector(),
             }
         )

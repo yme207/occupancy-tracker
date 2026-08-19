@@ -250,6 +250,17 @@ data rather than trusted alone:
   behind a stale occupant token if other evidence for it has also gone quiet — but should not
   instantly zero out a room; it works through the same latch/transit machinery as any other
   departure evidence, anchored at an egress point.
+- **Narrow, opt-in exception (added 2026-08-19, docs/DECISIONS.md's "zone-fusion away-clear"
+  entry):** the engine's per-Area counting model has no per-occupant identity to attach a specific
+  tracked person's "not_home" to, so the richer per-token confidence-decay described above isn't
+  implemented. Instead, a whole-house, explicitly opt-in (default off) escape hatch exists: once
+  *every* tracked person/device_tracker reads AWAY (not merely outside the home zone — genuinely
+  away, not near-house-approaching either) continuously for a configurable delay, the whole house is
+  force-cleared to 0. This is the one place zone presence is allowed to change the occupant count at
+  all, and only because sensor-driven latching has no other way to self-correct once every tracked
+  household member is confirmed elsewhere — it is never silent (opt-in, plainly-labeled, and
+  debounced against a momentary GPS blip) and never partial/per-Area (it's a whole-house correction,
+  not corroboration nudging a specific room's count).
 
 ### 6.8 Confidence & Ambiguity Handling
 

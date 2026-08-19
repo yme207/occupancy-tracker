@@ -36,3 +36,10 @@ CONF_LONG_LATCHED_REVIEW_THRESHOLD = "long_latched_review_threshold"
 #: (docs/DECISIONS.md's "uncertain births" entry), same duration-dict
 #: storage as above.
 CONF_UNCERTAIN_BIRTH_RESOLUTION_DELAY = "uncertain_birth_resolution_delay"
+#: Options-flow key: `ZoneFusionConfig.clear_house_when_all_away` (docs/DECISIONS.md's
+#: "zone-fusion away-clear" entry) — opt-in, defaults off.
+CONF_CLEAR_HOUSE_WHEN_ALL_AWAY = "clear_house_when_all_away"
+#: Options-flow key: `ZoneFusionConfig.zone_away_clear_delay` (docs/DECISIONS.md's
+#: "zone-fusion away-clear" entry), same duration-dict storage as the other
+#: duration tunables above.
+CONF_ZONE_AWAY_CLEAR_DELAY = "zone_away_clear_delay"

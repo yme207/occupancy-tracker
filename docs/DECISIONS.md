@@ -14,6 +14,60 @@ Format:
 
 ---
 
+## 2026-08-19 — Zone-fusion away-clear: a whole-house, opt-in exception to "zone presence never changes the count"
+**Decision:** `ZoneFusion` gains one narrow, explicitly opt-in behavior that breaks the 2026-08-08
+"zone fusion kept out of the engine's counting logic entirely" decision: once every tracked
+`person`/`device_tracker` entity has read `ZoneMembership.AWAY` — not `HOME`, and not `NEAR_HOUSE`
+either, since "approaching" is the opposite of "confirmed gone" — continuously for
+`ZoneFusionConfig.zone_away_clear_delay` (default 15 minutes), `ZoneFusion` calls a new
+`OccupancyEngine.clear_house()` directly, force-zeroing every Area's occupant count. Gated behind a
+new `ZoneFusionConfig.clear_house_when_all_away` flag that **defaults to `False`** — this is not
+enabled just by configuring a tracked person, unlike every other zone-fusion behavior. `async_start()`
+also seeds `_memberships` from each tracked entity's *current* state before subscribing, so a restart
+while the house is already confirmed empty starts the countdown immediately rather than waiting on a
+zone-state *change* that might never come (the exact "HA rebooting" shape a real overnight
+walkthrough hits). `OccupancyEngine.clear_house()` itself follows the same pattern as
+`override_occupant_count`/`expire_vacant_area`: clears every pending transit and uncertain birth
+(both presuppose an occupant the house is now confirmed not to have), but deliberately leaves
+`egress_anchor_total` and the learned transit-timing/sensor-reliability statistics untouched — this
+corrects a belief, it isn't new evidence about a door crossing or how this house's sensors behave.
+`SPEC.md` §6.7 updated with an honest, narrow exception explaining this, mirroring how the
+"uncertain births" entry documented its own exception to §6.2. 16 new tests (6 for
+`OccupancyEngine.clear_house`, 9 for `ZoneFusion`'s away-clear scheduling/cancellation/firing, 1 new
+options-flow default-value test, plus extended assertions in two existing options-flow/`__init__.py`
+wiring tests), `ruff`/`ruff format --check`/`mypy`/full `pytest` all clean.
+**Why:** Root-caused directly from a real-house failure the project owner reported: a full weekday
+with the house genuinely empty (confirmed by the owner's own schedule) produced a `Total Occupant
+Count` climbing to 6–7 by evening. Root cause (see this session's chat transcript for the full
+analysis, not reproduced here) is structural, not a regression from recent sessions: the engine's
+latch-only model has no way to reduce a count except a confirmed egress-point departure, decay for
+`device_class: occupancy`-only Areas (most real houses use ordinary motion sensors instead, which are
+never decay-eligible), or an uncertain-birth self-correction (which only fires for a genuine near-tie
+between 2+ plausible candidates, not a lone false trigger in an otherwise-quiet house). None of the
+four research recommendations built earlier this project (egress anchor, scored timing, uncertain
+births, learned timing) address *this* failure mode — they all improve attributing a real, slow human
+transit correctly, not a false sensor trigger with no real transit happening at all, since there is no
+other signal to distinguish the two in that case. The project owner explicitly chose this direction
+(force-clear on confirmed all-away, opt-in default-off, 15-minute debounce) over two alternatives via
+an interactive design conversation before any code was written, matching how every other engine
+rework in this project has been decided.
+**Alternatives considered (raised with the project owner, not chosen):** (1) Flag-only — never
+auto-correct, just raise a very visible warning and require a manual `set_occupant_count` call.
+Rejected in favor of auto-clear: the project owner's actual failure mode (nobody watching a dashboard
+at 2pm on a weekday) specifically needs a correction that doesn't require a human to notice and act.
+(2) On-by-default once a person is configured — rejected because the feature is only correct when
+every person who might realistically be home (kids, guests, a relative without a smartphone) carries
+a tracked device; a silent default-on would risk a wrong auto-clear for any household where that
+coverage assumption doesn't hold, with no explicit moment where the user affirms it does. (3) A
+10-minute vs. 30-minute debounce were also discussed; 15 minutes was chosen as a middle ground — fast
+enough to correct a wrong count same-day, long enough that a brief GPS dropout right after everyone
+leaves won't trigger it early.
+**Known limitation, not fixed here:** this is a whole-house, not per-occupant, correction — the
+underlying "per-token occupant identity" gap `SPEC.md` §6.7 and the 2026-08-08 zone-fusion decision
+both already note is unbuilt (would need a larger redesign) is still unbuilt. If only *some* tracked
+people are away while others are genuinely home but untracked, this feature (correctly) never fires,
+since `_all_tracked_away()` requires every tracked entity to read AWAY, not just "none home."
+
 ## 2026-08-16 — Per-Area sensor reliability: learned decay-grace widening from confirmed pass-throughs
 **Decision:** Closes the second scope limit noted after the research-recommendation work (the first,
 egress-arrival reattribution, closed earlier the same day — see below). `OccupancyEngine` now learns,

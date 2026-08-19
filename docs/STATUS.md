@@ -1234,10 +1234,12 @@ complete.
    repeatable algorithm testing) anyway — but if a future session specifically needs live HA
    entity-triggering (e.g. to test `signal_ingestion.py`'s own wiring, not just the engine), this would
    need a fresh diagnosis attempt.
-7. **Plain-language pass needs browser verification** (see "Eleventh" above) — `topology-panel.js`'s
-   rewritten copy was checked with `node --check` and by re-reading the diff, but never seen rendered;
-   confirm it reads well and nothing looks cut off/misaligned in an actual browser before considering
-   this pass fully done.
+7. ~~**Plain-language pass needs browser verification**~~ — resolved 2026-08-16: the project owner
+   confirmed in a live browser that the plain-language copy pass ("Eleventh"), the area-kind-override/
+   outdoor-area-toggle controls and their "Currently treated as" hint ("Thirteenth"), and the live
+   Total Occupancy/per-room quality-ring readout on the main graph page (added same day as the
+   "Ninth" real-house finding) all pass. Nothing left needing browser confirmation from prior
+   sessions' backend-only work.
 
 The browser-verification loop this session (project owner testing → real bug found → fix → retest)
 worked well through six slices in a row now and is worth continuing — see "Local dev Home Assistant
@@ -1252,3 +1254,73 @@ code alone), and **always restart after pulling in Python changes** (pure JS/fro
 
 No HA-python test harness applies to frontend JS; verification is manual in-browser per
 `CLAUDE.md`'s UI rule.
+
+**Twentieth** (2026-08-16): the project owner confirmed the browser-verification item above (all
+panel UI checked live, passes) and stated two concrete next real-world checks, not yet done as of
+this entry:
+- **Overnight performance**: watching whether this session's engine rework (area-kind classification
+  through per-Area sensor reliability — "Tenth" through "Nineteenth") actually fixes the original
+  "Ninth" finding (Total Occupancy latching above ground truth) in the real house overnight, with 1
+  real occupant. This is the real-world test of the whole session's line of work, not just the
+  scripted scenario coverage it currently rests on.
+- **A real departure/egress scenario**: the project owner will be working away from home tomorrow and
+  wants to see how the engine handles occupancy dropping to 0 when everyone leaves — first real-world
+  exercise of the egress-confirmation path (`_handle_egress_activity`, `egress_anchor_total`) and
+  whole-house-empty behavior outside of scripted tests.
+No code changed this entry — purely a status/handoff note so the next session picks up expecting the
+project owner's report on both, not starting fresh.
+
+**Twenty-first** (2026-08-19): the "Twentieth" entry's overnight/empty-house real-world check came
+back, and it was bad — a full empty weekday (project owner at the office, house confirmed empty by
+their own schedule) produced `Total Occupant Count` climbing to 6–7 by evening, with a chart pasted
+showing a slow sawtooth climb, occasional partial drops, and a hard reset only at an HA reboot. Full
+root-cause analysis done (code review of `occupancy_engine.py`, `signal_ingestion.py`,
+`engine_adapter.py`, `provenance.py`, cross-checked against `docs/DECISIONS.md`'s own history and the
+existing scenario-test suite) — see `docs/DECISIONS.md`'s new 2026-08-19 "zone-fusion away-clear"
+entry for the full trace. **Bottom line: not a new bug from recent sessions.** This is the exact
+failure mode the project owner already flagged as "\[OPEN, needs design work\]" on 2026-08-15 (the
+"Ninth" entry above) — the four research recommendations built since then (egress anchor, scored
+timing, uncertain births, learned timing) all improve attributing a real, slow human transit
+correctly; none of them address a false sensor trigger with no real transit happening at all, since
+the engine's latch-only model has no way to reduce a count except a confirmed egress-point departure,
+`device_class: occupancy`-only decay (most real houses use ordinary motion sensors, never eligible),
+or an uncertain-birth near-tie resolution (which requires 2+ plausible candidates — a lone false
+trigger in an otherwise-quiet house never qualifies). This exact "empty house, sporadic uncorrelated
+sensor noise over many hours" scenario had no test coverage at all before this session — every
+existing scenario test assumes 1+ real people moving through the house.
+
+Confirmed, by design, that the companion app's location has no influence on the count today
+(`ZoneFusion` never calls into the engine, `SPEC.md` §6.7/2026-08-08 decision) — and, after an
+interactive design conversation with the project owner (three decisions: auto-clear rather than
+flag-only, opt-in default-off rather than on-by-default, 15-minute debounce), built the first real
+fix: **zone-fusion away-clear**. `ZoneFusion` gains an opt-in (`clear_house_when_all_away`, default
+`False`) behavior that force-clears the whole house to 0 once every tracked person/device_tracker has
+read confirmed-AWAY (not `HOME`, not `NEAR_HOUSE`) continuously for `zone_away_clear_delay` (default
+15 minutes) — the one narrow, explicitly-opt-in exception to `SPEC.md` §6.7's "zone presence alone
+must never silently change the occupant count" rule, now documented there. New
+`OccupancyEngine.clear_house()`, wired through a new `async_call_later`-based timer in `zone_fusion.py`
+(mirroring `signal_ingestion.py`'s existing decay-timer pattern), including seeding from each tracked
+entity's *current* state at `async_start()` so a restart while the house is already empty starts the
+countdown immediately rather than waiting on a zone-state change that might never come — directly
+covers the "HA rebooting" reset visible in the project owner's own chart. New options-flow fields
+(`clear_house_when_all_away` as a `selector.BooleanSelector`, `zone_away_clear_delay` as a
+`selector.DurationSelector`) with plain-language copy stating the coverage caveat explicitly (only
+safe if everyone who might be home carries a tracked device). 16 new tests (270 → 286 total; see
+`docs/DECISIONS.md` for the breakdown), `ruff`/`ruff format --check`/`mypy`/full `pytest` all clean.
+
+**Explicitly not built this session** (raised as candidate directions, not yet decided by the project
+owner): widening decay eligibility beyond `device_class: occupancy` to ordinary motion sensors (would
+re-open the 2026-08-08 "latch, not decay" decision — a real trade-off, not a quick tweak); a scripted
+regression test for the "empty house, sporadic sensor noise" scenario itself (recommended, not yet
+added — candidate for `tests/test_engine_scenarios_realhouse.py`). Also a practical, non-code note:
+the project owner's house currently has only 2 monitored egress points per the "Algorithm
+scenario-testing harness" section above — worth checking whether other real entry points (garage,
+side gate, windows used for access) are missing bound egress sensors, since a real departure through
+any of those is just as invisible to the engine as a phantom arrival is.
+
+**Next action**: the project owner needs to enable `clear_house_when_all_away` in the options flow
+(off by default) and confirm in their own real house that (1) the coverage caveat holds for their
+household, and (2) the next empty-weekday walkthrough actually clears to 0 instead of climbing. This
+is a live-effectiveness claim, not something the test suite alone can confirm — same "browser/
+real-house verification needed" pattern as every other real-world-facing change in this project's
+history.

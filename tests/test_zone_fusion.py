@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 from homeassistant.core import HomeAssistant, State
 from homeassistant.util import dt as dt_util
 
+from custom_components.occupancy_tracker.occupancy_engine import (
+    AreaActivitySignal,
+    HouseGraph,
+    OccupancyEngine,
+)
 from custom_components.occupancy_tracker.zone_fusion import (
     ZoneCorroboration,
     ZoneFusion,
@@ -188,3 +194,219 @@ async def test_async_stop_unsubscribes_and_clears_state(hass: HomeAssistant) -> 
     hass.states.async_set("person.alice", "not_home")
     await hass.async_block_till_done()
     assert zone_fusion.house_zone_corroboration() is ZoneCorroboration.UNKNOWN
+
+
+# -- Zone-fusion away-clear (docs/DECISIONS.md's "zone-fusion away-clear" entry) --
+
+
+def _occupied_engine() -> OccupancyEngine:
+    engine = OccupancyEngine(HouseGraph(area_ids=frozenset({"kitchen"})))
+    engine.process_signal(AreaActivitySignal("kitchen", dt_util.utcnow(), source="s1"))
+    assert engine.total_occupant_count(dt_util.utcnow()) == 1
+    return engine
+
+
+async def test_away_clear_disabled_by_default_even_when_all_away(hass: HomeAssistant) -> None:
+    """Opt-in, off by default (docs/DECISIONS.md) — must not schedule a
+    countdown at all unless `clear_house_when_all_away` is explicitly set.
+    """
+    engine = _occupied_engine()
+    zone_fusion = ZoneFusion(
+        hass, tracked_entity_ids=("person.alice",), near_house_zone_ids=(), engine=engine
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        await hass.async_block_till_done()
+
+    mock_later.assert_not_called()
+
+
+async def test_away_clear_schedules_a_timer_once_all_tracked_are_away(
+    hass: HomeAssistant,
+) -> None:
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(
+        clear_house_when_all_away=True, zone_away_clear_delay=timedelta(minutes=15)
+    )
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice", "person.bob"),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        await hass.async_block_till_done()
+        mock_later.assert_not_called()  # bob hasn't reported away yet
+
+        hass.states.async_set("person.bob", "not_home")
+        await hass.async_block_till_done()
+
+    assert mock_later.call_count == 1
+    args, _ = mock_later.call_args
+    assert args[0] is hass
+    assert args[1] == timedelta(minutes=15)
+
+
+async def test_away_clear_not_scheduled_while_one_tracked_person_is_home(
+    hass: HomeAssistant,
+) -> None:
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice", "person.bob"),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        hass.states.async_set("person.bob", "home")
+        await hass.async_block_till_done()
+
+    mock_later.assert_not_called()
+
+
+async def test_away_clear_not_scheduled_while_near_house(hass: HomeAssistant) -> None:
+    """Approaching (NEAR_HOUSE) is the opposite of confirmed-gone — must not
+    count toward "all away" the way a plain AWAY does.
+    """
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice",),
+        near_house_zone_ids=("zone.front_yard",),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+        hass.states.async_set(
+            "person.alice", "not_home", attributes={"in_zones": ["zone.front_yard"]}
+        )
+        await hass.async_block_till_done()
+
+    mock_later.assert_not_called()
+
+
+async def test_away_clear_timer_cancelled_when_someone_comes_home(hass: HomeAssistant) -> None:
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice",),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        cancel = mock_later.return_value
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        await hass.async_block_till_done()
+        assert mock_later.call_count == 1
+
+        hass.states.async_set("person.alice", "home")
+        await hass.async_block_till_done()
+
+    cancel.assert_called_once()
+
+
+async def test_away_clear_firing_clears_the_engine(hass: HomeAssistant) -> None:
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice",),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        await hass.async_block_till_done()
+        args, _ = mock_later.call_args
+        fire = args[2]
+
+    assert engine.total_occupant_count(dt_util.utcnow()) == 1
+    fire(dt_util.utcnow())
+    assert engine.total_occupant_count(dt_util.utcnow()) == 0
+
+
+async def test_away_clear_firing_does_nothing_if_someone_returned_since_scheduling(
+    hass: HomeAssistant,
+) -> None:
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice",),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        await hass.async_block_till_done()
+        args, _ = mock_later.call_args
+        fire = args[2]
+
+        hass.states.async_set("person.alice", "home")
+        await hass.async_block_till_done()
+
+        fire(dt_util.utcnow())  # the stale callback still gets invoked directly
+
+    assert engine.total_occupant_count(dt_util.utcnow()) == 1
+
+
+async def test_away_clear_seeded_from_state_already_away_at_startup(hass: HomeAssistant) -> None:
+    """A restart while the house was already confirmed empty (docs/DECISIONS.md
+    — the exact "HA rebooting" shape of a real overnight walkthrough) must
+    start the countdown immediately, not wait for a subsequent zone change
+    that might never come.
+    """
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    hass.states.async_set("person.alice", "not_home")
+    await hass.async_block_till_done()
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice",),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        zone_fusion.async_start()
+
+    assert mock_later.call_count == 1
+
+
+async def test_async_stop_cancels_a_pending_away_clear_timer(hass: HomeAssistant) -> None:
+    engine = _occupied_engine()
+    config = ZoneFusionConfig(clear_house_when_all_away=True)
+    zone_fusion = ZoneFusion(
+        hass,
+        tracked_entity_ids=("person.alice",),
+        near_house_zone_ids=(),
+        config=config,
+        engine=engine,
+    )
+    with patch("custom_components.occupancy_tracker.zone_fusion.async_call_later") as mock_later:
+        cancel = mock_later.return_value
+        zone_fusion.async_start()
+        hass.states.async_set("person.alice", "not_home")
+        await hass.async_block_till_done()
+
+        zone_fusion.async_stop()
+
+    cancel.assert_called_once()
